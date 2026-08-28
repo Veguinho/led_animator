@@ -12,6 +12,12 @@ venv/
 *.preview.gif
 *.preview.mp4
 
+# Curated showcase assets embedded in README.md.
+!output/cs2.preview.gif
+!output/test1.preview.gif
+!output/cs2_256x256.preview.mp4
+!output/cs2_48x48.preview.mp4
+
 # Local source videos can also be large; retain only the folder itself.
 video_clips/*
 !video_clips/.gitkeep
