@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.venv/
+venv/
+
+# Generated animations can be large.
+*.ledanim.npz
+*.ledmap.json
+*.preview.gif
+*.preview.mp4
+
+# Local source videos can also be large; retain only the folder itself.
+video_clips/*
+!video_clips/.gitkeep
+
+# Editor and OS metadata.
+.idea/
+.vscode/
+.DS_Store
