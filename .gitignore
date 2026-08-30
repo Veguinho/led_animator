@@ -11,6 +11,7 @@ venv/
 *.ledmap.json
 *.preview.gif
 *.preview.mp4
+cs2_16x16_player/cs2_16x16_animation.h
 
 # Curated showcase assets embedded in README.md.
 !output/cs2.preview.gif
