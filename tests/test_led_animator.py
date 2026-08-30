@@ -18,7 +18,10 @@ from led_animator import (
     frame_to_led_grid,
     generate_animation,
     load_npz,
+    map_led_intensity,
     merge_neighboring_pixels,
+    iter_square_video_frames,
+    probe_video,
     render_led_frame,
     save_led_map,
     save_npz,
@@ -80,6 +83,32 @@ class PixelMergingTests(unittest.TestCase):
         result = frame_to_led_grid(frame, grid_size=48)
         self.assertEqual(result.shape, (48, 48, 3))
         np.testing.assert_array_equal(result, np.broadcast_to([12, 34, 56], result.shape))
+
+
+class LedIntensityTests(unittest.TestCase):
+    def test_black_is_off_and_dark_pixels_use_less_power(self):
+        frame = np.array(
+            [[[0, 0, 0], [8, 8, 8], [64, 32, 16], [128, 128, 128]]],
+            dtype=np.uint8,
+        )
+
+        mapped = map_led_intensity(frame)
+
+        np.testing.assert_array_equal(
+            mapped,
+            np.array(
+                [[[0, 0, 0], [0, 0, 0], [12, 6, 3], [56, 56, 56]]],
+                dtype=np.uint8,
+            ),
+        )
+
+    def test_full_intensity_color_and_hue_are_preserved(self):
+        frame = np.array([[[255, 128, 0]]], dtype=np.uint8)
+        np.testing.assert_array_equal(map_led_intensity(frame), frame)
+
+    def test_gamma_one_keeps_raw_channel_intensities(self):
+        frame = np.array([[[4, 20, 100]]], dtype=np.uint8)
+        np.testing.assert_array_equal(map_led_intensity(frame, gamma=1.0), frame)
 
 
 class OutputTests(unittest.TestCase):
@@ -144,6 +173,35 @@ class OutputTests(unittest.TestCase):
         frame = np.zeros((16, 16, 3), dtype=np.uint8)
         image = render_led_frame(frame, led_size=10, gap=6)
         self.assertEqual(image.getpixel((3, 11)), (0, 0, 0))
+
+    def test_preview_can_render_unlit_leds_as_pure_black(self):
+        frame = np.zeros((16, 16, 3), dtype=np.uint8)
+        image = render_led_frame(
+            frame, led_size=1, gap=0, unlit_color=(0, 0, 0)
+        )
+        self.assertFalse(np.any(np.asarray(image)))
+
+    def test_lossless_rgb_preview_does_not_bleed_red_into_black(self):
+        frames = np.zeros((2, 16, 16, 3), dtype=np.uint8)
+        frames[:, 8, 8] = [255, 0, 0]
+        animation = LedAnimation(frames, 25.0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lossless-rgb.mp4"
+            save_preview_mp4(
+                animation,
+                path,
+                led_size=1,
+                gap=0,
+                unlit_color=(0, 0, 0),
+                crf=0,
+                preserve_rgb=True,
+            )
+            decoded = np.stack(
+                list(iter_square_video_frames(path, probe_video(path)))
+            )
+
+        np.testing.assert_array_equal(decoded, frames)
 
     def test_default_mp4_preview_is_256_pixels_at_up_to_60_fps(self):
         args = build_parser().parse_args(["input.mp4"])
@@ -308,7 +366,7 @@ class LargeGridEntrypointTests(unittest.TestCase):
                         frame_store.stat().st_size,
                         3 * 48 * 48 * 3,
                     )
-                    self.assertEqual(int(animation.frames[2, 0, 0, 0]), 30)
+                    self.assertEqual(int(animation.frames[2, 0, 0, 0]), 2)
                 finally:
                     animation.close()
         finally:

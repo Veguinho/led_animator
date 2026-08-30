@@ -16,13 +16,37 @@ from typing import Protocol
 import numpy as np
 
 from export_arduino import encode_rgb565
-from led_animator import frame_to_led_grid, iter_square_video_frames, probe_video
+from led_animator import (
+    LED_INTENSITY_GAMMA,
+    frame_to_led_grid,
+    iter_square_video_frames,
+    map_led_intensity,
+    probe_video,
+)
 
 
 WIDTH = 16
 HEIGHT = 16
 FRAME_BYTES = WIDTH * HEIGHT * 2
-SERIAL_BAUD = 921_600
+SERIAL_BAUD = 230_400
+DEFAULT_STREAM_FPS = 30.0
+DEFAULT_PORT_WAIT = 30.0
+
+# Common USB serial names on macOS, Linux, and boards using WCH or Silicon Labs
+# USB-to-UART chips. Restricting automatic selection to these names prevents a
+# Mac's Bluetooth headphones and speakers from being mistaken for the panel.
+USB_SERIAL_PREFIXES = (
+    "cu.usbmodem",
+    "cu.usbserial",
+    "cu.wchusbserial",
+    "cu.SLAB_USBtoUART",
+    "tty.usbmodem",
+    "tty.usbserial",
+    "tty.wchusbserial",
+    "tty.SLAB_USBtoUART",
+    "ttyACM",
+    "ttyUSB",
+)
 
 REQUEST_MAGIC = b"LEDS"
 RESPONSE_MAGIC = b"LEDR"
@@ -145,7 +169,10 @@ def exchange_packet(
 
 
 def iter_compiled_video(
-    path: Path, source_fps: float, output_fps: float
+    path: Path,
+    source_fps: float,
+    output_fps: float,
+    led_gamma: float = LED_INTENSITY_GAMMA,
 ) -> Iterator[bytes]:
     """Decode, sample, resize, and RGB565-encode without saving the video."""
     info = probe_video(path)
@@ -155,11 +182,15 @@ def iter_compiled_video(
         if frame_time + 1e-12 < next_output_time:
             continue
         grid = frame if frame.shape == (HEIGHT, WIDTH, 3) else frame_to_led_grid(frame)
-        yield encode_rgb565(grid)
+        yield encode_rgb565(map_led_intensity(grid, led_gamma))
         next_output_time += 1.0 / output_fps
 
 
-def open_video(path: Path, target_fps: float | None = None) -> FrameSource:
+def open_video(
+    path: Path,
+    target_fps: float | None = None,
+    led_gamma: float = LED_INTENSITY_GAMMA,
+) -> FrameSource:
     if not path.is_file():
         raise ValueError(f"video does not exist: {path}")
     info = probe_video(path)
@@ -168,9 +199,11 @@ def open_video(path: Path, target_fps: float | None = None) -> FrameSource:
     fps = min(info.fps, target_fps) if target_fps is not None else info.fps
     if not np.isfinite(fps) or fps <= 0:
         raise ValueError("FPS must be a positive finite number")
+    if not np.isfinite(led_gamma) or led_gamma <= 0:
+        raise ValueError("LED gamma must be a positive finite number")
     return FrameSource(
         fps=fps,
-        iter_frames=lambda: iter_compiled_video(path, info.fps, fps),
+        iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma),
     )
 
 
@@ -184,25 +217,49 @@ def list_serial_ports() -> list[str]:
     return [port.device for port in list_ports.comports()]
 
 
-def resolve_port(requested: str) -> str:
-    if requested != "auto":
-        return requested
-    ports = list_serial_ports()
-    usb_ports = [
+def usb_serial_ports(ports: list[str]) -> list[str]:
+    """Return only ports whose device names identify USB serial hardware."""
+    return [
         port
         for port in ports
-        if Path(port).name.startswith(("cu.usbmodem", "cu.usbserial"))
+        if Path(port).name.startswith(USB_SERIAL_PREFIXES)
     ]
-    callout_ports = [port for port in ports if port.startswith("/dev/cu.")]
-    candidates = usb_ports or callout_ports or ports
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
-        raise RuntimeError("no serial controller found; connect it or pass --port")
-    choices = "\n  ".join(candidates)
-    raise RuntimeError(
-        f"multiple serial ports found; select one with --port:\n  {choices}"
-    )
+
+
+def resolve_port(
+    requested: str,
+    *,
+    wait_timeout: float = 0.0,
+    poll_interval: float = 0.25,
+) -> str:
+    """Resolve an explicit port or wait for one USB controller to appear."""
+    if requested != "auto":
+        return requested
+
+    deadline = time.monotonic() + wait_timeout
+    announced_wait = False
+    while True:
+        candidates = usb_serial_ports(list_serial_ports())
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            choices = "\n  ".join(candidates)
+            raise RuntimeError(
+                "multiple USB serial controllers found; select one with --port:\n"
+                f"  {choices}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "no USB serial controller found; reconnect the board or pass --port"
+            )
+        if not announced_wait:
+            print(
+                f"Waiting up to {wait_timeout:g} seconds for a USB serial "
+                "controller. Connect the board...",
+                file=sys.stderr,
+            )
+            announced_wait = True
+        time.sleep(poll_interval)
 
 
 def open_serial(port: str, timeout: float) -> SerialConnection:
@@ -212,12 +269,17 @@ def open_serial(port: str, timeout: float) -> SerialConnection:
         raise RuntimeError(
             "pyserial is required; run: python3 -m pip install -r requirements.txt"
         ) from exc
-    return serial.Serial(
-        port=port,
-        baudrate=SERIAL_BAUD,
-        timeout=min(0.1, timeout),
-        write_timeout=timeout,
-    )
+    # Configure DTR/RTS before opening. Their pyserial defaults are asserted,
+    # which can hold some ESP32-S3 auto-reset circuits in reset indefinitely.
+    connection = serial.Serial()
+    connection.port = port
+    connection.baudrate = SERIAL_BAUD
+    connection.timeout = min(0.1, timeout)
+    connection.write_timeout = timeout
+    connection.dtr = False
+    connection.rts = False
+    connection.open()
+    return connection
 
 
 def handshake(
@@ -297,7 +359,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port", default="auto", help="serial port (default: auto-detect)"
     )
-    parser.add_argument("--fps", type=float, help="optional maximum streaming FPS")
+    parser.add_argument(
+        "--port-wait",
+        type=float,
+        default=DEFAULT_PORT_WAIT,
+        help="seconds to wait for an auto-detected board (default: 30)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=DEFAULT_STREAM_FPS,
+        help="maximum streaming FPS (default: 30)",
+    )
+    parser.add_argument(
+        "--led-gamma",
+        type=float,
+        default=LED_INTENSITY_GAMMA,
+        help=(
+            "LED intensity curve; higher values make dark pixels dimmer "
+            "(default: 2.2)"
+        ),
+    )
     parser.add_argument("--loop", action="store_true", help="repeat until Ctrl-C")
     parser.add_argument(
         "--timeout",
@@ -332,13 +414,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: VIDEO.mp4 is required unless --list-ports is used")
     if args.timeout <= 0:
         raise SystemExit("error: --timeout must be positive")
+    if args.port_wait < 0:
+        raise SystemExit("error: --port-wait cannot be negative")
     if args.retries < 0:
         raise SystemExit("error: --retries cannot be negative")
 
     connection: SerialConnection | None = None
     try:
-        source = open_video(args.video, args.fps)
-        port = resolve_port(args.port)
+        source = open_video(args.video, args.fps, args.led_gamma)
+        port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port} at {SERIAL_BAUD} baud...", file=sys.stderr)
         connection = open_serial(port, args.timeout)
         # Opening USB serial often resets an ESP32. Retries cover boot and the

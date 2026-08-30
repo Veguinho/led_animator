@@ -27,6 +27,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 GRID_SIZE = 16
 FORMAT_VERSION = 1
+LED_INTENSITY_GAMMA = 2.2
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,7 @@ def iter_square_video_frames(
     finally:
         process.stdout.close()
         stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+        process.stderr.close()
         return_code = process.wait()
         if return_code != 0 and sys.exc_info()[0] is None:
             raise RuntimeError(f"FFmpeg could not decode {path}: {stderr}")
@@ -237,9 +239,36 @@ def frame_to_led_grid(frame: np.ndarray, grid_size: int = GRID_SIZE) -> np.ndarr
     return normalized.astype(np.uint8, copy=False)
 
 
+def map_led_intensity(
+    frame: np.ndarray,
+    gamma: float = LED_INTENSITY_GAMMA,
+) -> np.ndarray:
+    """Map video brightness to LED PWM intensity without changing its hue.
+
+    Video RGB is perceptually encoded, while an addressable LED's channel
+    values control its duty cycle much more directly.  Scaling every channel
+    by the pixel's peak intensity raised to ``gamma - 1`` makes dark video
+    pixels use proportionally less LED power.  Using one scale per pixel keeps
+    the RGB channel ratios (and therefore the hue) intact.
+    """
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError("frame must be an RGB image")
+    if not math.isfinite(gamma) or gamma <= 0:
+        raise ValueError("gamma must be a positive finite number")
+
+    source = frame.astype(np.float32, copy=False)
+    peak = source.max(axis=2, keepdims=True) / 255.0
+    if gamma == 1.0:
+        return frame.astype(np.uint8, copy=True)
+    scale = np.zeros_like(peak)
+    np.power(peak, gamma - 1.0, out=scale, where=peak > 0)
+    return np.rint(source * scale).clip(0, 255).astype(np.uint8)
+
+
 def generate_animation(
     video_path: Path,
     frame_store_path: Path | None = None,
+    led_gamma: float = LED_INTENSITY_GAMMA,
 ) -> LedAnimation:
     """Convert frames one at a time, optionally writing each directly to disk."""
     info = probe_video(video_path)
@@ -262,6 +291,7 @@ def generate_animation(
                 if frame.shape == expected_shape
                 else frame_to_led_grid(frame, GRID_SIZE)
             )
+            grid = map_led_intensity(grid, led_gamma)
             if output is None:
                 frames.append(grid)
             else:
@@ -476,7 +506,12 @@ def _render_large_led_frame(
     return Image.fromarray(pixels, mode="RGB")
 
 
-def render_led_frame(frame: np.ndarray, led_size: int = 20, gap: int = 2) -> Image.Image:
+def render_led_frame(
+    frame: np.ndarray,
+    led_size: int = 20,
+    gap: int = 2,
+    unlit_color: tuple[int, int, int] = (4, 3, 2),
+) -> Image.Image:
     """Render one grid as bright circular LEDs with camera-like color bloom."""
     if led_size < 1 or gap < 0:
         raise ValueError("led_size must be at least 1 and gap cannot be negative")
@@ -488,7 +523,7 @@ def render_led_frame(frame: np.ndarray, led_size: int = 20, gap: int = 2) -> Ima
         source = frame.astype(np.float32) / 255.0
         boosted = np.rint(np.power(source, 0.72) * 255.0).astype(np.uint8)
         rendered = np.empty_like(frame)
-        rendered[:] = [4, 3, 2]
+        rendered[:] = unlit_color
         lit = np.any(frame != 0, axis=2)
         rendered[lit] = boosted[lit]
         return Image.fromarray(rendered, mode="RGB")
@@ -546,7 +581,7 @@ def render_led_frame(frame: np.ndarray, led_size: int = 20, gap: int = 2) -> Ima
 
     for bounds, color, brightness in led_colors:
         # A barely visible face gives switched-off LEDs physical presence.
-        draw.ellipse(bounds, fill=(4, 3, 2))
+        draw.ellipse(bounds, fill=unlit_color)
         if brightness == 0:
             continue
 
@@ -575,10 +610,15 @@ def save_preview_mp4(
     led_size: int = 16,
     gap: int = 0,
     preview_fps: float = 60.0,
+    unlit_color: tuple[int, int, int] = (4, 3, 2),
+    crf: int = 20,
+    preserve_rgb: bool = False,
 ) -> None:
     """Stream sampled preview frames into an H.264 MP4."""
     if not math.isfinite(preview_fps) or preview_fps <= 0:
         raise ValueError("preview_fps must be a positive finite number")
+    if not isinstance(crf, int) or not 0 <= crf <= 51:
+        raise ValueError("crf must be an integer from 0 to 51")
 
     # Reduce only the exported MP4 frame rate. The LedAnimation itself remains
     # untouched, so NPZ, JSON, and desktop playback keep the source frame rate.
@@ -587,6 +627,8 @@ def save_preview_mp4(
     canvas_size = gap + GRID_SIZE * (led_size + gap)
     encoded_fps = preview_frame_count / animation.duration
     ffmpeg = _require_program("ffmpeg")
+    codec = "libx264rgb" if preserve_rgb else "libx264"
+    pixel_format = "rgb24" if preserve_rgb else "yuv420p"
     command = [
         ffmpeg,
         "-v",
@@ -605,13 +647,13 @@ def save_preview_mp4(
         "-vf",
         "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:v",
-        "libx264",
+        codec,
         "-preset",
         "medium",
         "-crf",
-        "20",
+        str(crf),
         "-pix_fmt",
-        "yuv420p",
+        pixel_format,
         "-movflags",
         "+faststart",
         "-f",
@@ -625,7 +667,9 @@ def save_preview_mp4(
     try:
         for frame_number in range(preview_frame_count):
             index = frame_number * len(animation.frames) // preview_frame_count
-            image = render_led_frame(animation.frames[index], led_size, gap)
+            image = render_led_frame(
+                animation.frames[index], led_size, gap, unlit_color
+            )
             try:
                 process.stdin.write(image.tobytes())
             finally:
@@ -749,6 +793,15 @@ def build_parser(
         default=16,
         help="frames per NPZ compression batch (default: 16)",
     )
+    parser.add_argument(
+        "--led-gamma",
+        type=float,
+        default=LED_INTENSITY_GAMMA,
+        help=(
+            "LED intensity curve; higher values make dark pixels dimmer "
+            "(default: 2.2)"
+        ),
+    )
     return parser
 
 
@@ -847,7 +900,11 @@ def main(
             staged_npz_path = work_path / npz_path.name
             staged_json_path = work_path / json_path.name
             staged_preview_path = work_path / preview_path.name
-            animation = generate_animation(args.video, frame_store_path)
+            animation = generate_animation(
+                args.video,
+                frame_store_path,
+                args.led_gamma,
+            )
             try:
                 save_npz(animation, staged_npz_path, args.batch_size)
                 if not args.no_json:

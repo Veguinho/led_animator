@@ -17,9 +17,16 @@ constexpr bool FLIP_VERTICAL = false;
 constexpr uint16_t MAX_POWER_MILLIAMPS = 2000;
 constexpr bool RUN_STARTUP_MATRIX_TEST = true;
 
-constexpr uint32_t SERIAL_BAUD = 921600;
+// CH340 adapters can corrupt data at 921600 baud on macOS. 230400 reliably
+// carries 16x16 RGB565 frames at the streamer's default 30 FPS.
+constexpr uint32_t SERIAL_BAUD = 230400;
 constexpr uint16_t BYTES_PER_FRAME = NUM_LEDS * 2;
 constexpr uint16_t MAX_PACKET_PAYLOAD = BYTES_PER_FRAME;
+
+// The board's CH340 USB-to-serial chip is wired to UART0. On an ESP32-S3,
+// enabling "USB CDC On Boot" remaps the generic Serial object to native USB,
+// so always use Serial0 to keep this protocol on the CH340 cable.
+#define PANEL_SERIAL Serial0
 
 constexpr uint8_t PROTOCOL_VERSION = 1;
 constexpr uint8_t PACKET_HELLO = 1;
@@ -127,17 +134,18 @@ void sendResponse(uint8_t status, uint16_t detail, uint32_t sequence) {
   response[5] = status;
   writeU16(response + 6, detail);
   writeU32(response + 8, sequence);
-  Serial.write(response, sizeof(response));
+  PANEL_SERIAL.write(response, sizeof(response));
 }
 
 bool readExact(uint8_t *destination, uint16_t length) {
-  return Serial.readBytes(reinterpret_cast<char *>(destination), length) == length;
+  return PANEL_SERIAL.readBytes(reinterpret_cast<char *>(destination), length) ==
+         length;
 }
 
 bool findRequestMagic() {
   static uint8_t matched = 0;
-  while (Serial.available() > 0) {
-    const uint8_t value = Serial.read();
+  while (PANEL_SERIAL.available() > 0) {
+    const uint8_t value = PANEL_SERIAL.read();
     if (value == REQUEST_MAGIC[matched]) {
       ++matched;
       if (matched == sizeof(REQUEST_MAGIC)) {
@@ -244,8 +252,8 @@ void receivePacket() {
 }
 
 void setup() {
-  Serial.begin(SERIAL_BAUD);
-  Serial.setTimeout(100);
+  PANEL_SERIAL.begin(SERIAL_BAUD);
+  PANEL_SERIAL.setTimeout(100);
 
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
