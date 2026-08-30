@@ -108,8 +108,8 @@ bold, charming look of a real LED panel.
   and soft colored halos make the simulation feel photographed—not flat.
 - **Long videos stay manageable.** Frames flow through the converter one at a
   time instead of filling your computer's memory.
-- **Your original colors stay honest.** The glow is only added to the visual
-  preview; the saved RGB values remain untouched.
+- **Your colors keep their identity.** A shared intensity scale preserves each
+  pixel's RGB proportions while dark areas use less real LED power.
 - **A failed export stays tidy.** Finished files appear together, so an error
   cannot leave a confusing mix of old and new results.
 
@@ -279,15 +279,27 @@ python3 stream_arduino.py video_clips/my_video.mp4 --loop
 ```
 
 The Mac decodes the MP4 with FFmpeg, center-crops it, converts every selected
-frame to a 16×16 RGB565 image, and sends the 512-byte frames at 921600 baud.
-Nothing is written to a generated `.h` file. If more than one serial device is
-connected, list and select the controller explicitly:
+frame to a 16×16 RGB565 image, applies an LED intensity curve, and sends the
+512-byte frames at 230400 baud. Pure black switches the LED off; colors near
+black keep their hue but use progressively less PWM power instead of being
+shown as equally bright colors.
+Playback defaults to 30 FPS for reliable CH340 USB-serial operation.
+Nothing is written to a generated `.h` file. With the default `--port auto`,
+the streamer ignores Bluetooth devices and waits up to 30 seconds for a USB
+serial board, so it can be started before disconnecting and reconnecting the
+cable. Change the wait with `--port-wait 60`, or disable it with
+`--port-wait 0`. If more than one USB serial controller is connected, list and
+select the board explicitly:
 
 ```bash
 python3 stream_arduino.py --list-ports
 python3 stream_arduino.py video_clips/my_video.mp4 \
   --port /dev/cu.usbserial-1410 --fps 30 --loop
 ```
+
+The default `--led-gamma 2.2` gives dark pixels a strong intensity falloff.
+Use a lower value such as `--led-gamma 1.6` to reveal more shadow detail, or
+`--led-gamma 1` to send the original RGB channel levels without the curve.
 
 The default timing drops late frames to keep the video clock accurate. Add
 `--no-drop` if every frame matters more than real-time speed, or

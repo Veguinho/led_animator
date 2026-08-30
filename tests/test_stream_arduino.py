@@ -86,7 +86,8 @@ class StreamingProtocolTests(unittest.TestCase):
         first_red = struct.unpack_from("<H", compiled[0])[0]
         second_red = struct.unpack_from("<H", compiled[1])[0]
         self.assertEqual(first_red, 0)
-        self.assertEqual(second_red, (120 >> 3) << 11)
+        # Gamma 2.2 maps video red 120 to LED intensity 49 before RGB565.
+        self.assertEqual(second_red, (49 >> 3) << 11)
 
     def test_rejects_invalid_target_fps(self):
         with (
@@ -108,6 +109,35 @@ class StreamingProtocolTests(unittest.TestCase):
         ]
         with mock.patch.object(stream_arduino, "list_serial_ports", return_value=ports):
             self.assertEqual(resolve_port("auto"), "/dev/cu.usbserial-1410")
+
+    def test_auto_port_waits_for_board_after_cable_is_connected(self):
+        ports_before = [
+            "/dev/cu.Bluetooth-Incoming-Port",
+            "/dev/cu.Headphones",
+        ]
+        ports_after = ports_before + ["/dev/cu.usbserial-1410"]
+        with (
+            mock.patch.object(
+                stream_arduino,
+                "list_serial_ports",
+                side_effect=[ports_before, ports_after],
+            ),
+            mock.patch.object(stream_arduino.time, "sleep"),
+            mock.patch.object(stream_arduino.sys, "stderr"),
+        ):
+            self.assertEqual(
+                resolve_port("auto", wait_timeout=1.0, poll_interval=0.0),
+                "/dev/cu.usbserial-1410",
+            )
+
+    def test_auto_port_does_not_select_bluetooth_devices(self):
+        ports = [
+            "/dev/cu.Bluetooth-Incoming-Port",
+            "/dev/cu.JBLFlip5",
+        ]
+        with mock.patch.object(stream_arduino, "list_serial_ports", return_value=ports):
+            with self.assertRaisesRegex(RuntimeError, "no USB serial controller"):
+                resolve_port("auto")
 
 
 if __name__ == "__main__":

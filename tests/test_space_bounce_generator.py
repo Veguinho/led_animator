@@ -40,6 +40,28 @@ class SpaceBounceGeneratorTests(unittest.TestCase):
         white_pixels = np.all(frames == 255, axis=3)
         self.assertTrue(np.all(np.any(white_pixels, axis=(1, 2))))
 
+    def test_every_frame_contains_only_the_ball_and_red_trail_on_black(self):
+        frames = generate_frames(30)
+        white_pixels = np.all(frames == 255, axis=3)
+        red_pixels = (
+            (frames[..., 0] > 0)
+            & (frames[..., 0] < 255)
+            & (frames[..., 1] == 0)
+            & (frames[..., 2] == 0)
+        )
+        valid_pixels = white_pixels | red_pixels | np.all(frames == 0, axis=3)
+
+        self.assertTrue(np.all(np.sum(white_pixels, axis=(1, 2)) == 5))
+        self.assertTrue(np.all(np.any(red_pixels, axis=(1, 2))))
+        self.assertTrue(np.all(valid_pixels))
+
+    def test_red_trail_contains_multiple_fading_intensities(self):
+        frame = generate_frames(360)[180]
+        red_only = frame[(frame[..., 1] == 0) & (frame[..., 2] == 0)]
+        intensities = np.unique(red_only[:, 0])
+        visible_intensities = intensities[intensities > 0]
+        self.assertGreaterEqual(len(visible_intensities), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
