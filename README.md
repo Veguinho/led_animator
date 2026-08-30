@@ -305,6 +305,31 @@ The default timing drops late frames to keep the video clock accurate. Add
 `--no-drop` if every frame matters more than real-time speed, or
 `--clear-on-exit` to turn off the panel when playback stops.
 
+### React live to Mac system audio
+
+The panel can also react to music, a DJ set, a browser, or anything else being
+played by the Mac. This captures the digital system output directly; it does
+not listen through the microphone and the speakers keep playing normally:
+
+```bash
+python3 system_audio_visualizer.py --clear-on-exit
+```
+
+On the first run, macOS asks for **Screen & System Audio Recording** access for
+your terminal. Allow it in **System Settings > Privacy & Security**, then rerun
+the command if macOS requests a restart. The native capture helper is compiled
+automatically on its first run and requires macOS 13 or newer plus Apple's
+Command Line Tools.
+
+The default is a colorful oscilloscope wave. For mirrored frequency bars, use:
+
+```bash
+python3 system_audio_visualizer.py --style spectrum
+```
+
+Add `--sensitivity 1.5` for quiet sources, or select a controller explicitly
+with `--port /dev/cu.usbserial-1410` when multiple boards are connected.
+
 ### Run the tests
 
 ```bash
