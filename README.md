@@ -134,6 +134,7 @@ Each conversion can produce three useful versions of the same animation:
 | **Visual preview** `.preview.mp4` | A polished H.264 video that is easy to watch and share |
 | **Compact animation** `.ledanim.npz` | Small, lossless data for playback software and future LED board drivers |
 | **Portable LED map** `.ledmap.json` | Clearly structured colors and timing for other apps, devices, and microcontrollers |
+| **Arduino binary** `.ledbin` | Compact RGB565 frames that an ESP32 can play without parsing JSON or NPZ |
 
 This means one source video can move naturally from an idea on your screen to
 an animation on physical hardware.
@@ -247,6 +248,26 @@ for frame in frames:
 
 JSON frames follow `frames[frame][row][column][channel]`, starting at the
 top-left with RGB channel values from `0` through `255`.
+
+### Export for Arduino or ESP32
+
+JSON is convenient for exchanging data but wasteful on a microcontroller, and
+NPZ requires a ZIP/NumPy decoder. Export a 16×16 animation as RGB565 binary
+instead:
+
+```bash
+python3 export_arduino.py output/my_animation.ledmap.json \
+  -o output/my_animation_16x16.ledbin \
+  --fps 12 \
+  --header my_animation_player/my_animation.h \
+  --symbol my_animation
+```
+
+The `.ledbin` contains a 24-byte little-endian header followed by row-major
+RGB565 frames. The optional header embeds the same bytes in flash with
+`PROGMEM`, so no SD card or runtime filesystem is required. See
+`cs2_16x16_player/` for a FastLED player; set its data pin and serpentine layout
+to match the panel before uploading.
 
 ### Run the tests
 
