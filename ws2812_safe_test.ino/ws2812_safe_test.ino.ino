@@ -10,7 +10,7 @@ constexpr uint16_t NUM_LEDS = 256;
 // Teste seguro: somente um LED aceso por vez, com brilho baixo.
 constexpr uint8_t TEST_BRIGHTNESS = 20;
 constexpr uint16_t STEP_DELAY_MS = 60;
-
+ 
 CRGB leds[NUM_LEDS];
 
 void setup() {
