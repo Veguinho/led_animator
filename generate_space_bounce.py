@@ -15,7 +15,7 @@ from led_animator import LedAnimation, save_preview_mp4
 
 
 GRID_SIZE = 16
-DEFAULT_FPS = 20.0
+DEFAULT_FPS = 60.0
 DEFAULT_DURATION = 6.0
 
 
@@ -192,8 +192,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     parser.add_argument("--duration", type=float, default=DEFAULT_DURATION)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--led-size", type=int, default=16)
-    parser.add_argument("--gap", type=int, default=0)
     parser.add_argument(
         "--force", action="store_true", help="replace an existing MP4"
     )
@@ -224,8 +222,9 @@ def main(argv: list[str] | None = None) -> int:
         save_preview_mp4(
             animation,
             staged,
-            led_size=args.led_size,
-            gap=args.gap,
+            # One encoded pixel per LED: the MP4 itself is exactly 16x16.
+            led_size=1,
+            gap=0,
             preview_fps=args.fps,
         )
         staged.replace(args.output)

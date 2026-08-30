@@ -2,10 +2,21 @@ import unittest
 
 import numpy as np
 
-from generate_space_bounce import bounce_position, generate_frames
+from generate_space_bounce import (
+    DEFAULT_FPS,
+    bounce_position,
+    build_parser,
+    generate_frames,
+)
 
 
 class SpaceBounceGeneratorTests(unittest.TestCase):
+    def test_defaults_to_a_literal_16x16_60_fps_mp4(self):
+        args = build_parser().parse_args([])
+        self.assertEqual(args.fps, DEFAULT_FPS)
+        self.assertEqual(args.fps, 60.0)
+        self.assertEqual(args.output.suffix, ".mp4")
+
     def test_generates_deterministic_16x16_rgb_frames(self):
         first = generate_frames(24, seed=7)
         second = generate_frames(24, seed=7)
