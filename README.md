@@ -265,9 +265,33 @@ python3 export_arduino.py output/my_animation.ledmap.json \
 
 The `.ledbin` contains a 24-byte little-endian header followed by row-major
 RGB565 frames. The optional header embeds the same bytes in flash with
-`PROGMEM`, so no SD card or runtime filesystem is required. See
-`cs2_16x16_player/` for a FastLED player; set its data pin and serpentine layout
-to match the panel before uploading.
+`PROGMEM` for custom offline players. The included `cs2_16x16_player/` sketch
+now uses live USB streaming instead, so it does not include this header.
+
+### Stream an MP4 directly from a Mac
+
+The streaming sketch does not store an animation in flash. Upload
+`cs2_16x16_player/cs2_16x16_player.ino` once, connect the ESP32 by USB, and run:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 stream_arduino.py video_clips/my_video.mp4 --loop
+```
+
+The Mac decodes the MP4 with FFmpeg, center-crops it, converts every selected
+frame to a 16×16 RGB565 image, and sends the 512-byte frames at 921600 baud.
+Nothing is written to a generated `.h` file. If more than one serial device is
+connected, list and select the controller explicitly:
+
+```bash
+python3 stream_arduino.py --list-ports
+python3 stream_arduino.py video_clips/my_video.mp4 \
+  --port /dev/cu.usbserial-1410 --fps 30 --loop
+```
+
+The default timing drops late frames to keep the video clock accurate. Add
+`--no-drop` if every frame matters more than real-time speed, or
+`--clear-on-exit` to turn off the panel when playback stops.
 
 ### Run the tests
 
