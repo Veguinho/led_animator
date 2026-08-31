@@ -14,14 +14,33 @@ ready-to-use animation data.
   <img src="https://img.shields.io/badge/Every_LED-16.7M_Colors-00B8A9?style=for-the-badge" alt="16.7 million colors per LED">
 </p>
 
+**[Project overview](#-project-overview)** ·
 **[See the results](#-see-it-in-action)** ·
-**[Discover what it does](#-from-video-to-light)** ·
-**[Meet the AI robot](#-made-for-expressive-ai-robots)** ·
+**[Hardware](#-hardware-setup)** ·
 **[Run it yourself](#-run-it-yourself)**
 
 </div>
 
 ---
+
+## 🧭 Project overview
+
+LED Animator is an end-to-end toolkit for turning video, live audio, and
+procedural graphics into light on compact RGB LED displays. It handles both
+the creative side—cropping, resampling, color and realistic previews—and the
+hardware side, with RGB565 encoding, a checksummed serial protocol, an
+ESP32-S3 receiver, and real-time playback on a serpentine WS2812B matrix.
+
+| Mode | Input | Result |
+| :-- | :-- | :-- |
+| **Video conversion** | MP4 or another FFmpeg-readable clip | Preview MP4, NPZ, JSON, or Arduino binary |
+| **Direct video stream** | A clip decoded live on the Mac | 16×16 RGB565 frames sent over USB |
+| **Audio visualizer** | macOS system audio | Oscilloscope or mirrored spectrum that follows loudness |
+| **Lava lamp** | Python fluid simulation | Endless red, orange, and yellow animated fluid |
+
+The 16×16 live path is intentionally split in two: Python creates each logical
+frame, while the microcontroller concentrates on reliable transport, physical
+panel mapping, brightness, and power limiting.
 
 ## ✨ See it in action
 
@@ -164,6 +183,45 @@ Animator handles the visual conversion and hardware-friendly frame data.
 > robot controller. Think of it as the visual bridge between your robot's
 > personality and its LED display.
 
+## 🔌 Hardware setup
+
+The live 16×16 build uses an ESP32-S3, a 256-pixel WS2812B matrix, and a
+separate regulated 5 V supply. The Mac powers and programs the controller over
+USB; the external supply powers the LEDs. All grounds must be connected.
+
+```mermaid
+flowchart LR
+    MAC["Mac<br/>Python streamers"] <-->|"USB serial<br/>230400 baud"| ESP["ESP32-S3<br/>UART0 / CH340"]
+    ESP -->|"GPIO 10<br/>RGB data"| LEVEL["74AHCT125<br/>3.3 V → 5 V<br/>recommended"]
+    LEVEL -->|"330–470 Ω"| DIN["DIN<br/>16×16 WS2812B panel"]
+    PSU["Regulated 5 V supply<br/>at least 2 A for current firmware"] -->|"+5 V"| DIN
+    PSU -->|"GND"| DIN
+    PSU -->|"common GND"| ESP
+    PSU -->|"5 V + GND"| LEVEL
+```
+
+| Connection | Wire it to |
+| :-- | :-- |
+| Mac USB | ESP32-S3 USB/CH340 connector |
+| ESP32-S3 `GPIO 10` | Level-shifter input; output through a 330–470 Ω resistor to panel `DIN` |
+| External supply `+5 V` | Panel `5V` input, not through the ESP32 or USB connector |
+| External supply `GND` | Panel `GND`, ESP32 `GND`, and level-shifter `GND` |
+| 1000 µF capacitor (recommended) | Across panel `5V` and `GND`, close to the power input |
+
+> [!CAUTION]
+> Never power all 256 LEDs from the ESP32 5 V pin or from USB. The current
+> firmware uses global brightness `24/255` and FastLED's 2 A power limit. Use a
+> larger supply and suitable power injection if you raise those limits. Do not
+> feed the external supply's `+5 V` back into a USB-powered controller unless
+> that specific board supports it.
+
+The level shifter is strongly recommended for a robust installation because
+the ESP32-S3 outputs 3.3 V logic while a 5 V WS2812B panel expects a higher
+data-high level. Short test wiring may work without it, but is more sensitive
+to cable length, noise, and supply voltage. The firmware maps logical rows to
+the panel's serpentine chain, so the Python scripts always work with an ordinary
+top-left, row-major 16×16 image.
+
 ## 🚀 Run it yourself
 
 Everything needed to try the project is below. No setup commands are required
@@ -265,13 +323,15 @@ python3 export_arduino.py output/my_animation.ledmap.json \
 
 The `.ledbin` contains a 24-byte little-endian header followed by row-major
 RGB565 frames. The optional header embeds the same bytes in flash with
-`PROGMEM` for custom offline players. The included `cs2_16x16_player/` sketch
-now uses live USB streaming instead, so it does not include this header.
+`PROGMEM` for custom offline players. The included
+`cs2_16x16_player_firmware/` sketch uses live USB streaming instead, so it does
+not include this header.
 
 ### Stream an MP4 directly from a Mac
 
 The streaming sketch does not store an animation in flash. Upload
-`cs2_16x16_player/cs2_16x16_player.ino` once, connect the ESP32 by USB, and run:
+`cs2_16x16_player_firmware/cs2_16x16_player_firmware.ino` once, connect the
+ESP32 by USB, and run:
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -305,6 +365,27 @@ The default timing drops late frames to keep the video clock accurate. Add
 `--no-drop` if every frame matters more than real-time speed, or
 `--clear-on-exit` to turn off the panel when playback stops.
 
+### Stream the procedural lava lamp
+
+The lava-lamp mode runs a small Eulerian fluid simulation with advection,
+pressure projection, viscosity, vorticity, cooling, and thermal buoyancy. It
+renders red edges, orange bodies, and yellow-hot cores directly to the panel;
+no source video is required:
+
+```bash
+python3 lava_lamp_stream.py --clear-on-exit
+```
+
+Slow the motion or reduce software brightness without changing the firmware:
+
+```bash
+python3 lava_lamp_stream.py --speed 0.75 --brightness 0.8 --clear-on-exit
+```
+
+The default 48×48 simulation grid is averaged down to the physical 16×16
+matrix. Use `--seed` for a repeatable flow pattern, `--fps` for the refresh
+rate, or `--port` when more than one USB controller is connected.
+
 ### React live to Mac system audio
 
 The panel can also react to music, a DJ set, a browser, or anything else being
@@ -327,8 +408,24 @@ The default is a colorful oscilloscope wave. For mirrored frequency bars, use:
 python3 system_audio_visualizer.py --style spectrum
 ```
 
-Add `--sensitivity 1.5` for quiet sources, or select a controller explicitly
+Both styles follow the audio level in dBFS: loud passages grow and glow more,
+while quiet passages stay smaller and dimmer.
+
+The default dB response multiplier is `--sensitivity 1.5`. Raise it further
+for especially quiet sources, or select a controller explicitly
 with `--port /dev/cu.usbserial-1410` when multiple boards are connected.
+
+To compile and upload the ESP32 sketch and immediately start the live spectrum,
+install Arduino CLI with `brew install arduino-cli`, then run:
+
+```bash
+./start.sh
+```
+
+The launcher auto-detects the USB port and uses the ESP32-S3 board profile. Use
+`./start.sh --no-upload` to restart only the Python stream, or pass another
+board profile with `--fqbn` when needed. All remaining options, such as
+`--sensitivity 2`, are forwarded to the visualizer.
 
 ### Run the tests
 
