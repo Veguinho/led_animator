@@ -4,7 +4,7 @@ constexpr uint8_t DATA_PIN = 10;
 constexpr uint8_t WIDTH = 16;
 constexpr uint8_t HEIGHT = 16;
 constexpr uint16_t NUM_LEDS = WIDTH * HEIGHT;
-constexpr uint8_t BRIGHTNESS = 48;
+constexpr uint8_t BRIGHTNESS = 24;
 
 // A matriz e formada por uma unica cadeia em zigue-zague. Estas opcoes mudam
 // somente a orientacao da imagem; nenhuma delas reduz a area desenhada.
