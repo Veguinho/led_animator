@@ -38,6 +38,17 @@ CAPTURE_BINARY = ROOT / ".build" / "system_audio_capture"
 SAMPLE_RATE = 48_000
 GRID_SIZE = 16
 FFT_SIZE = 2_048
+MIN_DBFS = -72.0
+MAX_DBFS = -6.0
+DEFAULT_SENSITIVITY = 1.5
+
+
+def amplitude_to_level(amplitude: float, sensitivity: float = 1.0) -> float:
+    """Map a linear audio amplitude to a perceptual 0..1 dBFS level."""
+    if amplitude <= 0.0:
+        return 0.0
+    dbfs = 20.0 * np.log10(max(amplitude * sensitivity, 1e-12))
+    return float(np.clip((dbfs - MIN_DBFS) / (MAX_DBFS - MIN_DBFS), 0.0, 1.0))
 
 
 def build_capture_helper() -> Path:
@@ -170,16 +181,38 @@ class AudioCapture:
 
 
 def color_palette() -> np.ndarray:
-    """Return a warm-low to violet-high 16-color RGB palette."""
+    """Return one smooth dark-blue through purple to red X-axis gradient."""
+    stops = (
+        (0.00, (0.65, 0.93, 0.72)),  # dark blue
+        (1.00, (0.00, 1.00, 1.00)),  # red
+    )
     colors = []
     for column in range(GRID_SIZE):
-        hue = (0.98 + 0.72 * column / (GRID_SIZE - 1)) % 1.0
-        colors.append(colorsys.hsv_to_rgb(hue, 1.0, 1.0))
-    return np.rint(np.asarray(colors) * 255).astype(np.uint8)
+        position = column / (GRID_SIZE - 1)
+        for (left_position, left), (right_position, right) in zip(
+            stops, stops[1:]
+        ):
+            if position <= right_position:
+                amount = (position - left_position) / (
+                    right_position - left_position
+                )
+                left_hue, left_saturation, left_value = left
+                right_hue, right_saturation, right_value = right
+                hue_delta = (right_hue - left_hue + 0.5) % 1.0 - 0.5
+                hue = (left_hue + hue_delta * amount) % 1.0
+                saturation = left_saturation + (
+                    right_saturation - left_saturation
+                ) * amount
+                value = left_value + (right_value - left_value) * amount
+                colors.append(colorsys.hsv_to_rgb(hue, saturation, value))
+                break
+    return np.rint(np.asarray(colors) * 255).clip(0, 255).astype(np.uint8)
 
 
 class AudioVisualizer:
-    def __init__(self, style: str, sensitivity: float = 1.0) -> None:
+    def __init__(
+        self, style: str, sensitivity: float = DEFAULT_SENSITIVITY
+    ) -> None:
         if style not in {"spectrum", "wave"}:
             raise ValueError("style must be 'spectrum' or 'wave'")
         if not np.isfinite(sensitivity) or sensitivity <= 0:
@@ -196,40 +229,84 @@ class AudioVisualizer:
             (frequencies >= edges[index]) & (frequencies < edges[index + 1])
             for index in range(GRID_SIZE)
         ]
-        self.spectrum_peak = 0.05
-        self.wave_gain = 4.0
+        self.volume_level = 0.0
+        self.band_brightness = np.zeros(GRID_SIZE, dtype=np.float32)
+
+    def _update_volume_level(self, signal: np.ndarray) -> float:
+        rms = float(np.sqrt(np.mean(np.square(signal, dtype=np.float64))))
+        target = amplitude_to_level(rms, self.sensitivity)
+        rate = 0.72 if target > self.volume_level else 0.16
+        self.volume_level += (target - self.volume_level) * rate
+        return self.volume_level
+
+    def _volume_brightness(self) -> float:
+        # Keep quiet audio visible, but reserve the strong glow for loud passages.
+        if self.volume_level <= 0.0:
+            return 0.0
+        return 0.06 + 0.94 * self.volume_level**1.35
 
     def render(self, samples: np.ndarray) -> np.ndarray:
         if self.style == "spectrum":
             fresh = self._render_spectrum(samples)
         else:
             fresh = self._render_wave(samples)
-        # A short phosphor-like decay makes motion fluid without obscuring beats.
-        self.previous *= 0.58
+        # Bright notes leave the panel sooner, while quiet details retain a
+        # slightly longer phosphor-like trail. This applies to every band.
+        frame_decay = 0.70 - 0.30 * self.volume_level
+        self.previous *= frame_decay
         self.previous = np.maximum(self.previous, fresh.astype(np.float32))
         return np.rint(self.previous).clip(0, 255).astype(np.uint8)
 
     def _render_spectrum(self, samples: np.ndarray) -> np.ndarray:
         signal = samples[-FFT_SIZE:].astype(np.float32, copy=True)
         signal -= signal.mean()
+        self._update_volume_level(signal)
         magnitudes = np.abs(np.fft.rfft(signal * self.window))
         magnitudes *= 2.0 / max(float(self.window.sum()), 1.0)
         bands = np.array(
             [float(np.max(magnitudes[mask])) if np.any(mask) else 0.0 for mask in self.band_masks],
             dtype=np.float32,
         )
-        energy = np.log1p(bands * 160.0 * self.sensitivity)
-        current_peak = float(np.max(energy))
-        self.spectrum_peak = max(current_peak, self.spectrum_peak * 0.965, 0.05)
-        targets = np.clip(energy / self.spectrum_peak, 0.0, 1.0)
-        rates = np.where(targets > self.levels, 0.72, 0.20)
+        # Absolute dBFS levels preserve the difference between a quiet passage and
+        # a loud one. The previous peak-normalization made both look equally big.
+        targets = np.array(
+            [amplitude_to_level(float(band), self.sensitivity) for band in bands],
+            dtype=np.float32,
+        )
+        # Height reacts quickly, while brightness changes a little more gently.
+        # Keeping separate envelopes avoids visible flashes between frames.
+        level_release = np.clip(0.12 + 0.38 * self.levels, 0.12, 0.50)
+        rates = np.where(targets > self.levels, 0.55, level_release)
         self.levels += (targets - self.levels) * rates
+        brightness_release = np.clip(
+            0.09 + 0.40 * self.band_brightness, 0.09, 0.49
+        )
+        brightness_rates = np.where(
+            targets > self.band_brightness, 0.42, brightness_release
+        )
+        self.band_brightness += (
+            targets - self.band_brightness
+        ) * brightness_rates
+
+        # Lightly blend neighboring envelopes so adjacent colors flow into one
+        # another instead of changing brightness in isolated hard steps.
+        padded_brightness = np.pad(self.band_brightness, 1, mode="edge")
+        smooth_brightness = np.convolve(
+            padded_brightness, np.array([0.05, 0.90, 0.05]), mode="valid"
+        )
 
         frame = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
         for column, level in enumerate(self.levels):
             height = min(8, int(np.ceil(level * 8.0)))
+            band_intensity = (
+                0.0
+                if smooth_brightness[column] <= 0.0
+                else 0.015 + 0.985 * smooth_brightness[column] ** 1.55
+            )
             for offset in range(height):
-                brightness = 0.38 + 0.62 * (1.0 - offset / 8.0)
+                distance = offset / (GRID_SIZE // 2 - 1)
+                axis_falloff = max(0.0, 1.0 - distance) ** 2.4
+                brightness = band_intensity * axis_falloff
                 color = np.rint(self.palette[column] * brightness).astype(np.uint8)
                 frame[7 - offset, column] = color
                 frame[8 + offset, column] = color
@@ -239,9 +316,9 @@ class AudioVisualizer:
         signal = samples[-FFT_SIZE:].astype(np.float32, copy=False)
         peak = float(np.max(np.abs(signal)))
         if peak < 0.0005:
+            self._update_volume_level(signal)
             return np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
-        target_gain = min(40.0, 0.88 / max(peak, 0.005)) * self.sensitivity
-        self.wave_gain += (target_gain - self.wave_gain) * 0.12
+        self._update_volume_level(signal)
 
         # Trigger on a rising zero crossing to keep musical waveforms steadier.
         crossings = np.flatnonzero((signal[:-1] <= 0) & (signal[1:] > 0))
@@ -251,19 +328,22 @@ class AudioVisualizer:
             visible = signal[-720:]
         positions = np.linspace(0, len(visible) - 1, GRID_SIZE)
         values = np.interp(positions, np.arange(len(visible)), visible)
-        values = np.clip(values * self.wave_gain, -1.0, 1.0)
+        wave_size = self.volume_level**1.25
+        values = np.clip(values / peak * wave_size, -1.0, 1.0)
         rows = np.rint(7.5 - values * 7.0).astype(int)
 
         frame = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
+        color_scale = self._volume_brightness()
         for column in range(GRID_SIZE):
             row = rows[column]
-            frame[row, column] = self.palette[column]
+            color = np.rint(self.palette[column] * color_scale).astype(np.uint8)
+            frame[row, column] = color
             if column == 0:
                 continue
             previous_row = rows[column - 1]
             low, high = sorted((previous_row, row))
             for joined_row in range(low, high + 1):
-                frame[joined_row, column] = self.palette[column]
+                frame[joined_row, column] = color
         return frame
 
 
@@ -287,8 +367,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sensitivity",
         type=float,
-        default=1.0,
-        help="audio response multiplier (default: 1.0)",
+        default=DEFAULT_SENSITIVITY,
+        help=f"audio response multiplier (default: {DEFAULT_SENSITIVITY:g})",
     )
     parser.add_argument(
         "--port", default="auto", help="serial port (default: auto-detect)"
