@@ -207,6 +207,55 @@
       .row select {
         font-size: 12px;
       }
+      .motion-control {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        margin-bottom: 24px;
+      }
+      .knob {
+        --sweep: 0deg;
+        --angle: -135deg;
+        position: relative;
+        flex: 0 0 96px;
+        width: 96px;
+        height: 96px;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: conic-gradient(from 225deg, var(--accent) 0deg var(--sweep),
+          var(--line) var(--sweep) 270deg, transparent 270deg);
+        touch-action: none;
+        user-select: none;
+        cursor: ns-resize;
+      }
+      .knob::before {
+        content: "";
+        position: absolute;
+        inset: 7px;
+        border: 1px solid #484852;
+        border-radius: 50%;
+        background: linear-gradient(145deg, #383842, #1b1b22);
+        box-shadow: 0 4px 10px #0008;
+      }
+      .knob::after {
+        content: "";
+        position: absolute;
+        width: 4px;
+        height: 16px;
+        left: 46px;
+        top: 16px;
+        border-radius: 3px;
+        background: var(--accent);
+        transform-origin: 2px 32px;
+        transform: rotate(var(--angle));
+      }
+      #slowdown-value {
+        display: block;
+        color: var(--accent);
+        font-size: 24px;
+        margin: 6px 0;
+      }
       .range-label {
         display: flex;
         justify-content: space-between;
@@ -321,15 +370,28 @@
         <div>
           <div class="eyebrow">System audio / LED studio</div>
           <h1>Live palette</h1>
-          <p>Shape the colors. Let the music do the rest.</p>
+          <p>Shape the colors and motion. Let the music do the rest.</p>
         </div>
         <div id="status" class="status" role="status" aria-live="polite">
           Connecting…
         </div>
       </header>
       <div class="layout">
-        <section class="card" aria-label="Palette controls">
+        <section class="card" aria-label="Visualization controls">
           <fieldset id="controls" disabled>
+            <div class="motion-control">
+              <button id="slowdown" class="knob" type="button" role="slider"
+                aria-labelledby="slowdown-label" aria-describedby="slowdown-help"
+                aria-valuemin="0" aria-valuemax="95" aria-valuenow="0"
+                aria-valuetext="0% slowdown, full speed"></button>
+              <div>
+                <h2 id="slowdown-label">Slowdown</h2>
+                <output id="slowdown-value" for="slowdown">0%</output>
+                <p id="slowdown-help">Drag up to slow the motion, down to speed it up.
+                  Arrow keys also work. Frames blend smoothly in between.</p>
+              </div>
+            </div>
+            <div class="divider"></div>
             <h2>Color combinations</h2>
             <p>Pick a starting point, then make it yours.</p>
             <div id="presets" class="presets"></div>
@@ -379,7 +441,7 @@
             <footer>
               <p>Changes apply live.</p>
               <button id="reset" class="small" type="button">
-                Reset to rainbow
+                Reset defaults
               </button>
             </footer>
           </fieldset>
@@ -535,7 +597,46 @@
           $(key).value = Math.round(settings[key] * 100);
           $(key + "-value").value = $(key).value + "%";
         }
+        renderSlowdown();
       }
+      function renderSlowdown() {
+        const value = settings.slowdown;
+        const sweep = value / 95 * 270;
+        $("slowdown").style.setProperty("--sweep", sweep + "deg");
+        $("slowdown").style.setProperty("--angle", (sweep - 135) + "deg");
+        $("slowdown").setAttribute("aria-valuenow", value);
+        $("slowdown").setAttribute("aria-valuetext", `${value}% slowdown, ${100 - value}% speed`);
+        $("slowdown-value").value = value + "%";
+      }
+      function setSlowdown(value) {
+        if (!settings || $("controls").disabled) return;
+        settings.slowdown = Math.max(0, Math.min(95, Math.round(value)));
+        renderSlowdown();
+        queueUpdate();
+      }
+      let knobDrag = null;
+      $("slowdown").addEventListener("pointerdown", (event) => {
+        if (!settings || $("controls").disabled || event.button !== 0) return;
+        knobDrag = { id: event.pointerId, y: event.clientY, value: settings.slowdown };
+        $("slowdown").setPointerCapture(event.pointerId);
+        $("slowdown").focus();
+        event.preventDefault();
+      });
+      $("slowdown").addEventListener("pointermove", (event) => {
+        if (!knobDrag || event.pointerId !== knobDrag.id) return;
+        setSlowdown(knobDrag.value + (knobDrag.y - event.clientY) / 2);
+      });
+      for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
+        $("slowdown").addEventListener(event, () => { knobDrag = null; });
+      }
+      $("slowdown").addEventListener("keydown", (event) => {
+        if (!settings || $("controls").disabled) return;
+        const step = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1,
+          PageUp: 10, PageDown: -10 }[event.key];
+        if (step === undefined && event.key !== "Home" && event.key !== "End") return;
+        event.preventDefault();
+        setSlowdown(event.key === "Home" ? 0 : event.key === "End" ? 95 : settings.slowdown + step);
+      });
       function queueUpdate() {
         editVersion++;
         pending = structuredClone(settings);
@@ -555,7 +656,7 @@
           });
           revision = data.revision;
           draw(data);
-          if (!pending) status("● Live · palette synced");
+          if (!pending) status("● Live · controls synced");
         } catch (error) {
           // Keep the latest edit for the next poll to retry after reconnection.
           if (!pending) pending = next;
@@ -617,6 +718,7 @@
           brightness: 1,
           saturation: 1,
           reverse: false,
+          slowdown: 0,
         };
         renderSettings();
         queueUpdate();
@@ -639,13 +741,13 @@
               renderSettings();
             }
             draw(data);
-            status("● Live · palette synced");
+            status("● Live · controls synced");
           }
           if (pending && !sending) flush();
         } catch (error) {
           status("Disconnected · waiting for visualizer", "error");
         }
-        setTimeout(poll, 150);
+        setTimeout(poll, 33);
       }
       poll();
     </script>

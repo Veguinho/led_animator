@@ -11,12 +11,12 @@ import sys
 import threading
 import time
 import webbrowser
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
 
-from audio_palette_controls import PaletteControls, PaletteServer, make_palette
+from audio_palette_controls import PaletteControls, PaletteServer, make_palette, validate_slowdown
 from export_arduino import encode_rgb565
 from stream_arduino import (
     DEFAULT_PORT_WAIT,
@@ -197,15 +197,49 @@ def color_palette() -> np.ndarray:
     return make_palette(size=GRID_SIZE)
 
 
+class FrameDelayer:
+    """Advance fewer animation frames and blend at the caller's output cadence.
+
+    Each target uses current audio, so slowing the motion never accumulates
+    a backlog. A fractional phase keeps arbitrary percentages accurate.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._start: np.ndarray | None = None
+        self._target: np.ndarray | None = None
+        self._phase = 1.0
+
+    def render(self, next_frame: Callable[[], np.ndarray], slowdown: float) -> np.ndarray:
+        if slowdown == 0 or self._target is None:
+            frame = next_frame()
+            self._start = self._target = frame.astype(np.float32)
+            self._phase = 1.0
+            return frame
+        self._phase += 1.0 - slowdown / 100.0
+        if self._phase > 1.0 + 1e-9:
+            self._start = self._target
+            self._target = next_frame().astype(np.float32)
+            self._phase -= 1.0
+        amount = min(self._phase, 1.0)
+        frame = self._start * (1.0 - amount) + self._target * amount
+        return np.rint(frame).clip(0, 255).astype(np.uint8)
+
+
 class AudioVisualizer:
     def __init__(
         self, style: str, sensitivity: float = DEFAULT_SENSITIVITY,
-        controls: PaletteControls | None = None,
+        controls: PaletteControls | None = None, slowdown: float = 0.0,
     ) -> None:
         if style not in {"spectrum", "wave"}:
             raise ValueError("style must be 'spectrum' or 'wave'")
         if not np.isfinite(sensitivity) or sensitivity <= 0:
             raise ValueError("sensitivity must be positive")
+        validate_slowdown(slowdown)
+        self.slowdown = slowdown
+        self._delayer = FrameDelayer()
         self.style = style
         self.sensitivity = sensitivity
         self.palette = color_palette()
@@ -238,12 +272,20 @@ class AudioVisualizer:
 
     def render(self, samples: np.ndarray) -> np.ndarray:
         if self.controls is not None:
-            revision, palette = self.controls.palette_snapshot()
+            revision, palette, self.slowdown = self.controls.palette_snapshot()
             if revision != self._palette_revision:
-                self.palette = palette
                 self._palette_revision = revision
-                # Old colors must not linger after a live palette/brightness edit.
-                self.previous.fill(0)
+                if not np.array_equal(self.palette, palette):
+                    self.palette = palette
+                    # Color edits apply immediately, even mid-transition.
+                    self.previous.fill(0)
+                    self._delayer.reset()
+        frame = self._delayer.render(lambda: self._render_frame(samples), self.slowdown)
+        if self.controls is not None:
+            self.controls.publish_frame(frame)
+        return frame
+
+    def _render_frame(self, samples: np.ndarray) -> np.ndarray:
         if self.style == "spectrum":
             fresh = self._render_spectrum(samples)
         else:
@@ -253,10 +295,7 @@ class AudioVisualizer:
         frame_decay = 0.70 - 0.30 * self.volume_level
         self.previous *= frame_decay
         self.previous = np.maximum(self.previous, fresh.astype(np.float32))
-        frame = np.rint(self.previous).clip(0, 255).astype(np.uint8)
-        if self.controls is not None:
-            self.controls.publish_frame(frame)
-        return frame
+        return np.rint(self.previous).clip(0, 255).astype(np.uint8)
 
     def _render_spectrum(self, samples: np.ndarray) -> np.ndarray:
         signal = samples[-FFT_SIZE:].astype(np.float32, copy=True)
@@ -387,6 +426,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="LED refresh rate (default: 30)",
     )
     parser.add_argument(
+        "--slowdown", type=float, default=0.0,
+        help="reduce animation updates by 0–95 percent and blend intervening frames",
+    )
+    parser.add_argument(
         "--timeout", type=float, default=1.0, help="response timeout (default: 1)"
     )
     parser.add_argument(
@@ -414,6 +457,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --fps must be positive")
     if not np.isfinite(args.sensitivity) or args.sensitivity <= 0:
         raise SystemExit("error: --sensitivity must be positive")
+    try:
+        validate_slowdown(args.slowdown)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from exc
     if args.port_wait < 0:
         raise SystemExit("error: --port-wait cannot be negative")
     if args.timeout <= 0:
@@ -425,7 +472,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --controls-port must be between 0 and 65535")
 
     capture = AudioCapture()
-    controls = None if args.no_controls else PaletteControls()
+    controls = None if args.no_controls else PaletteControls(slowdown=args.slowdown)
     control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
     try:
@@ -435,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         capture.start()
-        visualizer = AudioVisualizer(args.style, args.sensitivity, controls)
+        visualizer = AudioVisualizer(args.style, args.sensitivity, controls, args.slowdown)
         source = FrameSource(
             fps=args.fps,
             iter_frames=lambda: iter_audio_frames(capture, visualizer),

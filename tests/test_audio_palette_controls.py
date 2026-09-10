@@ -39,6 +39,9 @@ class PaletteTests(unittest.TestCase):
             {"brightness": float("nan")}, {"brightness": -1},
             {"brightness": True}, {"saturation": 1.1}, {"reverse": "yes"},
             {"preset": []}, {"blend": {}}, {"extra": 1},
+            {"slowdown": -1}, {"slowdown": 100}, {"slowdown": True},
+            {"slowdown": float("nan")}, {"slowdown": float("inf")},
+            {"slowdown": "50"},
         ):
             with self.subTest(changes=changes):
                 with self.assertRaises(ValueError):
@@ -49,7 +52,7 @@ class PaletteTests(unittest.TestCase):
         controls = PaletteControls()
         snapshot = controls.state()
         snapshot["settings"]["colors"][0] = "#000000"
-        _, palette = controls.palette_snapshot()
+        _, palette, _ = controls.palette_snapshot()
         palette.fill(0)
         self.assertEqual(controls.state()["settings"], default_settings())
         self.assertTrue(np.any(controls.palette_snapshot()[1]))
@@ -72,11 +75,12 @@ class PaletteServerTests(unittest.TestCase):
     def test_page_and_live_update_round_trip(self):
         with urlopen(self.server.url, timeout=2) as response:
             self.assertIn(b"Live palette", response.read())
-        settings = default_settings() | {"preset": "ocean", "brightness": 0.4}
+        settings = default_settings() | {"preset": "ocean", "brightness": 0.4, "slowdown": 75}
         with self.post(json.dumps(settings).encode(), Origin=self.server.url) as response:
             saved = json.load(response)
         self.assertEqual(saved["settings"]["preset"], "ocean")
         self.assertEqual(saved["settings"]["brightness"], 0.4)
+        self.assertEqual(saved["settings"]["slowdown"], 75)
         with urlopen(self.server.url + "/api/state", timeout=2) as response:
             self.assertEqual(json.load(response), saved)
 

@@ -95,8 +95,31 @@ Once streaming starts, a **Live palette** panel opens in your browser at
 edit up to six colors with color pickers or hex codes; combine them as a smooth
 gradient or solid bands; reverse their order; and adjust brightness and
 saturation. All changes apply to the next audio frame in either style, with a
-live 16×16 preview. **Reset to rainbow** restores all default color settings.
-Each new session starts with rainbow; palettes are not saved between runs.
+live 16×16 preview. **Reset defaults** restores the rainbow palette and full
+animation speed. Settings are not saved between runs.
+
+The **Slowdown** knob reduces how often the animation advances while keeping
+the configured LED output rate. Drag up to increase the slowdown and down to
+decrease it, or focus the knob and use the arrow keys. Home selects 0%; End
+selects 95%. Intermediate frames blend smoothly between the new animation
+frames, and the preview shows those blended frames too.
+
+At the default 30 FPS, 50% slowdown creates 15 new animation frames per second
+and blends between them to keep sending 30 frames. At a configured 60 FPS,
+the same setting would create 30 new frames and send 60. The current USB setup
+still defaults to 30 FPS for reliable streaming; the knob does not change the
+serial speed or firmware. A higher slowdown makes reactions more gradual,
+but keeps sampling current audio instead of building an audio backlog.
+
+Set an initial slowdown from the command line, including without the browser:
+
+```bash
+./start.sh --no-upload --slowdown 50
+python3 system_audio_visualizer.py --style wave --slowdown 75 --no-controls
+```
+
+The range is 0–95%: 0% keeps the original response, and 95% advances at 5% of
+the output rate. Color and brightness edits still apply immediately.
 
 Use `--no-browser` to open the printed URL yourself, `--controls-port 8766` to
 choose another local port (`0` picks a free port), or `--no-controls` to run

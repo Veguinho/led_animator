@@ -59,14 +59,14 @@ class AudioVisualizerTests(unittest.TestCase):
         self.assertFalse(build_parser().parse_args([]).no_controls)
 
     def test_live_palette_recolors_both_styles_and_clears_old_trails(self):
-        for style in ("wave", "spectrum"):
-            with self.subTest(style=style):
-                controls = PaletteControls()
+        for style, slowdown in (("wave", 0), ("spectrum", 0), ("wave", 75), ("spectrum", 75)):
+            with self.subTest(style=style, slowdown=slowdown):
+                controls = PaletteControls(slowdown=slowdown)
                 visualizer = AudioVisualizer(style, controls=controls)
                 samples = self.tone(0.7, 440)
                 for _ in range(8):
                     visualizer.render(samples)
-                settings = default_settings()
+                settings = default_settings() | {"slowdown": slowdown}
                 settings.update(preset="custom", colors=["#00ff00"])
                 controls.update(settings)
                 frame = visualizer.render(samples)

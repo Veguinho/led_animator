@@ -27,7 +27,7 @@ def default_settings() -> dict:
     return {
         "preset": "rainbow", "colors": PRESETS["rainbow"].copy(),
         "blend": "gradient", "brightness": 1.0, "saturation": 1.0,
-        "reverse": False,
+        "reverse": False, "slowdown": 0.0,
     }
 
 
@@ -51,11 +51,17 @@ def validate_settings(settings: object) -> dict:
             raise ValueError(f"{key} must be between 0 and 1")
     if type(result["reverse"]) is not bool:
         raise ValueError("reverse must be true or false")
+    validate_slowdown(result["slowdown"])
     if result["preset"] != "custom":
         result["colors"] = PRESETS[result["preset"]].copy()
     else:
         result["colors"] = [color.lower() for color in colors]
     return result
+
+
+def validate_slowdown(value: object) -> None:
+    if type(value) not in (int, float) or not np.isfinite(value) or not 0 <= value <= 95:
+        raise ValueError("slowdown must be between 0 and 95 percent")
 
 
 def make_palette(settings: dict | None = None, size: int = 16) -> np.ndarray:
@@ -85,9 +91,9 @@ def make_palette(settings: dict | None = None, size: int = 16) -> np.ndarray:
 class PaletteControls:
     """Publish whole palettes atomically; rendering owns its animation state."""
 
-    def __init__(self) -> None:
+    def __init__(self, slowdown: float = 0.0) -> None:
         self._lock = threading.Lock()
-        self._settings = default_settings()
+        self._settings = validate_settings(default_settings() | {"slowdown": slowdown})
         self._palette = make_palette()
         self._revision = 0
         self._frame = np.zeros((16, 16, 3), dtype=np.uint8)
@@ -100,9 +106,9 @@ class PaletteControls:
             self._palette = palette
             self._revision += 1
 
-    def palette_snapshot(self) -> tuple[int, np.ndarray]:
+    def palette_snapshot(self) -> tuple[int, np.ndarray, float]:
         with self._lock:
-            return self._revision, self._palette.copy()
+            return self._revision, self._palette.copy(), self._settings["slowdown"]
 
     def publish_frame(self, frame: np.ndarray) -> None:
         with self._lock:
