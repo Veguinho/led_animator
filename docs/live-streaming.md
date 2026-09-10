@@ -75,11 +75,14 @@ not listen through the microphone and the speakers keep playing normally:
 python3 system_audio_visualizer.py --clear-on-exit
 ```
 
-On the first run, macOS asks for **Screen & System Audio Recording** access for
-your terminal. Allow it in **System Settings > Privacy & Security**, then rerun
-the command if macOS requests a restart. The native capture helper is compiled
-automatically on its first run and requires macOS 13 or newer plus Apple's
-Command Line Tools.
+On the first run, macOS asks for **System Audio Recording Only** access for
+the app launching the visualizer (Terminal for the command-line launcher).
+Allow it in **System Settings > Privacy & Security > Screen & System Audio
+Recording > System Audio Recording Only**, then restart that app if requested.
+The native helper uses Core Audio taps: it does not capture displays, windows,
+or the microphone, and does not need screen recording permission. It compiles
+automatically on its first run and requires macOS 14.2 or newer plus Apple's
+Command Line Tools. Audio is converted to mono 48 kHz for the visualizer.
 
 The default is a rainbow oscilloscope wave. For mirrored frequency bars, use:
 
@@ -120,15 +123,50 @@ The launcher auto-detects the USB port and uses the ESP32-S3 board profile. Use
 board profile with `--fqbn` when needed. All remaining options, such as
 `--sensitivity 2`, are forwarded to the visualizer.
 
+## Clickable Mac app and Dock shortcut
+
+Install the launcher in your personal Applications folder and pin it to the Dock:
+
+```bash
+.venv/bin/python scripts/install_macos_app.py --dock
+```
+
+Connect the board by USB, then click **LED Audio Visualizer** in the Dock (or
+double-click `~/Applications/LED Audio Visualizer.app`). A Terminal window starts
+the spectrum with the default rainbow palette, and the live color controls open
+in your browser once streaming begins. Play audio on the Mac to animate the LEDs.
+If macOS requests audio recording access, allow Terminal in **System Settings →
+Privacy & Security → Screen & System Audio Recording → System Audio Recording
+Only**. Screen recording access is not required.
+
+Keep the Terminal window open while using the visualizer. Press **Control-C** in
+that window to stop streaming and clear the LEDs. Closing the browser only closes
+the controls; it does not stop playback. Clicking the Dock shortcut again while
+an app-launched stream is running reopens the controls without starting a second
+stream. Stop any separately launched command-line streamer before using the app.
+
+The app uses this checkout and its `.venv`; it does not bundle Python or upload
+firmware. Install the firmware once using `./start.sh` if needed. Re-run the app
+installer if you move the project folder. Omit `--dock` to install only the app;
+you can also drag it from Finder into the Dock, as described in
+[Apple's Dock guide](https://support.apple.com/guide/mac-help/mh35859/mac).
+
+To launch the same app workflow from Terminal:
+
+```bash
+.venv/bin/python scripts/launch_audio_visualizer.py
+```
+
 ## Troubleshooting
 
 - **No board found:** run `python3 stream_arduino.py --list-ports`, check the
   USB data cable, and select a port with `--port`. Auto-detection waits 30 seconds.
 - **Port busy:** stop the previous streamer or close the Arduino Serial Monitor.
-- **Audio capture denied:** enable your terminal in macOS **Privacy & Security >
-  Screen & System Audio Recording**, then restart the terminal if requested.
+- **Audio capture denied:** enable the launching app in macOS **Privacy & Security >
+  Screen & System Audio Recording > System Audio Recording Only**, then restart
+  that app if requested. Screen recording permission is not required.
 - **Capture helper will not compile:** install Apple's Command Line Tools with
-  `xcode-select --install`. System-audio capture requires macOS 13 or newer.
+  `xcode-select --install`. Audio-only capture requires macOS 14.2 or newer.
 - **Wrong LED order or orientation:** check the serpentine mapping in the
   firmware. Python sends top-left, row-major frames.
 

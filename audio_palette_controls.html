@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Live palette · Audio visualizer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+        color: #eeeef4;
+        background: #101014;
+        --muted: #a4a4b4;
+        --line: #34343f;
+        --accent: #d4c1ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      main {
+        max-width: 1080px;
+        margin: auto;
+        padding: 48px 28px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 20px;
+        margin-bottom: 36px;
+      }
+      .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.19em;
+        color: var(--accent);
+        text-transform: uppercase;
+      }
+      h1 {
+        font-size: 36px;
+        font-weight: 550;
+        letter-spacing: -1.5px;
+        margin: 8px 0;
+      }
+      p {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+        margin: 0;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button,
+      select {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #24242d;
+        color: inherit;
+        padding: 10px 14px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 4px;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .status {
+        font-size: 12px;
+        white-space: nowrap;
+        color: var(--muted);
+      }
+      .status[data-state="live"] {
+        color: #9de5bd;
+      }
+      .status[data-state="error"] {
+        color: #ffafad;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(260px, 1fr);
+        gap: 24px;
+      }
+      .card {
+        background: #19191f;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 26px;
+      }
+      h2 {
+        font-size: 16px;
+        font-weight: 550;
+        margin: 0 0 8px;
+      }
+      .label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+      .label h2 {
+        margin: 0;
+      }
+      .presets {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 9px;
+        margin: 22px 0 28px;
+      }
+      .preset {
+        padding: 11px;
+        text-align: left;
+        font-size: 12px;
+        background: #1d1d25;
+      }
+      .preset[aria-pressed="true"] {
+        border-color: var(--accent);
+        background: #30283f;
+      }
+      .swatch {
+        display: block;
+        height: 8px;
+        border-radius: 3px;
+        margin-bottom: 10px;
+      }
+      .divider {
+        border-top: 1px solid var(--line);
+        margin: 24px 0;
+      }
+      .colors {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .stop {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: #22222b;
+        border-radius: 10px;
+        padding: 8px;
+      }
+      .stop input[type="color"] {
+        width: 36px;
+        height: 34px;
+        padding: 0;
+        border: 0;
+        background: none;
+        cursor: pointer;
+      }
+      .stop input[type="text"] {
+        width: 100%;
+        min-width: 0;
+        background: transparent;
+        color: inherit;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        padding: 5px;
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+      }
+      .stop input[aria-invalid="true"] {
+        border-color: #ff8585;
+      }
+      .stop button {
+        border: 0;
+        background: transparent;
+        padding: 5px 8px;
+        color: var(--muted);
+      }
+      .stop span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .small {
+        font-size: 12px;
+        padding: 7px 10px;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 18px;
+        margin-top: 20px;
+        font-size: 13px;
+      }
+      .row select {
+        font-size: 12px;
+      }
+      .range-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 13px;
+        margin: 22px 0 10px;
+      }
+      output {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      input[type="checkbox"] {
+        accent-color: var(--accent);
+        width: 17px;
+        height: 17px;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .preview-card {
+        position: sticky;
+        top: 24px;
+        align-self: start;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        aspect-ratio: 1;
+        background: #08080c;
+        border-radius: 12px;
+        margin: 22px 0 16px;
+      }
+      .palette-strip {
+        height: 18px;
+        display: flex;
+        overflow: hidden;
+        border-radius: 5px;
+        margin: 20px 0 9px;
+      }
+      .palette-strip span {
+        flex: 1;
+      }
+      .axis {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .note {
+        margin-top: 24px;
+        font-size: 12px;
+      }
+      footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-top: 26px;
+      }
+      footer p {
+        font-size: 12px;
+      }
+      fieldset {
+        border: 0;
+        padding: 0;
+        margin: 0;
+        min-width: 0;
+      }
+      @media (max-width: 700px) {
+        main {
+          padding: 26px 16px;
+        }
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+          margin-bottom: 24px;
+        }
+        h1 {
+          font-size: 30px;
+        }
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .preview-card {
+          position: static;
+          grid-row: 1;
+        }
+        .preview-card canvas {
+          max-width: 240px;
+          margin: 18px auto;
+        }
+        .card {
+          padding: 20px;
+        }
+        .presets {
+          margin-bottom: 20px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="eyebrow">System audio / LED studio</div>
+          <h1>Live palette</h1>
+          <p>Shape the colors. Let the music do the rest.</p>
+        </div>
+        <div id="status" class="status" role="status" aria-live="polite">
+          Connecting…
+        </div>
+      </header>
+      <div class="layout">
+        <section class="card" aria-label="Palette controls">
+          <fieldset id="controls" disabled>
+            <h2>Color combinations</h2>
+            <p>Pick a starting point, then make it yours.</p>
+            <div id="presets" class="presets"></div>
+            <div class="label">
+              <h2 id="palette-name">Rainbow</h2>
+              <button id="add" class="small" type="button">+ Add color</button>
+            </div>
+            <p>Colors run from left to right across your panel.</p>
+            <div id="colors" class="colors"></div>
+            <div class="row">
+              <label for="blend">Combine colors</label
+              ><select id="blend">
+                <option value="gradient">Smooth gradient</option>
+                <option value="bands">Solid bands</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="reverse" class="check"
+                ><input id="reverse" type="checkbox" />Reverse direction</label
+              >
+            </div>
+            <div class="divider"></div>
+            <label for="brightness" class="range-label"
+              >Brightness
+              <output id="brightness-value" for="brightness"
+                >100%</output
+              ></label
+            ><input
+              id="brightness"
+              type="range"
+              min="0"
+              max="100"
+              value="100"
+            />
+            <label for="saturation" class="range-label"
+              >Saturation
+              <output id="saturation-value" for="saturation"
+                >100%</output
+              ></label
+            ><input
+              id="saturation"
+              type="range"
+              min="0"
+              max="100"
+              value="100"
+            />
+            <footer>
+              <p>Changes apply live.</p>
+              <button id="reset" class="small" type="button">
+                Reset to rainbow
+              </button>
+            </footer>
+          </fieldset>
+        </section>
+        <aside class="card preview-card">
+          <div class="label">
+            <h2>Panel preview</h2>
+            <span class="eyebrow">16 × 16</span>
+          </div>
+          <p>The live frame sent to your LEDs.</p>
+          <canvas
+            id="preview"
+            width="384"
+            height="384"
+            role="img"
+            aria-label="Live 16 by 16 audio visualization"
+          ></canvas>
+          <div
+            id="strip"
+            class="palette-strip"
+            aria-label="Current color palette"
+          ></div>
+          <div class="axis"><span>Left edge</span><span>Right edge</span></div>
+          <p class="note">
+            The preview stays dark when audio is silent. Brightness adjusts the
+            palette; the music still controls each note’s glow.
+          </p>
+          <p class="note">Every new session starts with rainbow.</p>
+        </aside>
+      </div>
+    </main>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      const names = {
+        rainbow: "Rainbow",
+        "blue-red": "Blue → red",
+        sunset: "Sunset",
+        ocean: "Ocean",
+        neon: "Neon",
+        fire: "Fire",
+        custom: "Custom palette",
+      };
+      let settings,
+        presets,
+        revision = -1,
+        pending = null,
+        sending = false,
+        editVersion = 0;
+      const context = $("preview").getContext("2d");
+      function status(message, state = "live") {
+        $("status").textContent = message;
+        $("status").dataset.state = state;
+      }
+      async function request(path, options = {}) {
+        const response = await fetch(path, {
+          ...options,
+          signal: AbortSignal.timeout(3000),
+        });
+        const data = await response.json();
+        if (!response.ok)
+          throw new Error(data.error || "Could not update palette");
+        return data;
+      }
+      function draw(data) {
+        $("strip").replaceChildren(
+          ...data.palette.map((rgb) => {
+            const cell = document.createElement("span");
+            cell.style.background = `rgb(${rgb.join(",")})`;
+            return cell;
+          }),
+        );
+        context.clearRect(0, 0, 384, 384);
+        data.frame.forEach((row, y) =>
+          row.forEach((rgb, x) => {
+            context.fillStyle = `rgb(${rgb.map((v) => Math.max(12, v)).join(",")})`;
+            context.beginPath();
+            context.arc(x * 24 + 12, y * 24 + 12, 7.5, 0, Math.PI * 2);
+            context.fill();
+          }),
+        );
+      }
+      function markSelection() {
+        $("palette-name").textContent = names[settings.preset];
+        document
+          .querySelectorAll(".preset")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(button.dataset.preset === settings.preset),
+            ),
+          );
+        $("add").disabled = settings.colors.length >= 6;
+      }
+      function renderColors() {
+        $("colors").replaceChildren();
+        settings.colors.forEach((color, index) => {
+          const row = document.createElement("div");
+          row.className = "stop";
+          const number = document.createElement("span");
+          number.textContent = String(index + 1).padStart(2, "0");
+          const picker = document.createElement("input");
+          picker.type = "color";
+          picker.value = color;
+          picker.setAttribute("aria-label", `Color ${index + 1}`);
+          const hex = document.createElement("input");
+          hex.type = "text";
+          hex.value = color.toUpperCase();
+          hex.maxLength = 7;
+          hex.spellcheck = false;
+          hex.setAttribute("aria-label", `Color ${index + 1} hex code`);
+          picker.addEventListener("input", () => {
+            hex.value = picker.value.toUpperCase();
+            hex.removeAttribute("aria-invalid");
+            changeColor(index, picker.value);
+          });
+          hex.addEventListener("input", () => {
+            const valid = /^#[0-9a-f]{6}$/i.test(hex.value);
+            hex.setAttribute("aria-invalid", String(!valid));
+            if (valid) {
+              picker.value = hex.value;
+              changeColor(index, hex.value);
+            }
+          });
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.textContent = "×";
+          remove.title = `Remove color ${index + 1}`;
+          remove.setAttribute("aria-label", remove.title);
+          remove.disabled = settings.colors.length === 1;
+          remove.addEventListener("click", () => {
+            settings.colors.splice(index, 1);
+            settings.preset = "custom";
+            renderColors();
+            queueUpdate();
+          });
+          row.append(number, picker, hex, remove);
+          $("colors").append(row);
+        });
+        markSelection();
+      }
+      function changeColor(index, color) {
+        settings.colors[index] = color;
+        settings.preset = "custom";
+        markSelection();
+        queueUpdate();
+      }
+      function renderSettings() {
+        renderColors();
+        $("blend").value = settings.blend;
+        $("reverse").checked = settings.reverse;
+        for (const key of ["brightness", "saturation"]) {
+          $(key).value = Math.round(settings[key] * 100);
+          $(key + "-value").value = $(key).value + "%";
+        }
+      }
+      function queueUpdate() {
+        editVersion++;
+        pending = structuredClone(settings);
+        status("Applying…", "pending");
+        flush();
+      }
+      async function flush() {
+        if (sending || !pending) return;
+        sending = true;
+        const next = pending;
+        pending = null;
+        try {
+          const data = await request("/api/palette", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(next),
+          });
+          revision = data.revision;
+          draw(data);
+          if (!pending) status("● Live · palette synced");
+        } catch (error) {
+          // Keep the latest edit for the next poll to retry after reconnection.
+          if (!pending) pending = next;
+          status("Disconnected · retrying changes", "error");
+          sending = false;
+          return;
+        }
+        sending = false;
+        if (pending) flush();
+      }
+      function buildPresets() {
+        $("presets").replaceChildren();
+        for (const [key, colors] of Object.entries(presets)) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "preset";
+          button.dataset.preset = key;
+          const swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.style.background = `linear-gradient(90deg,${colors.join(",")})`;
+          button.append(swatch, document.createTextNode(names[key]));
+          button.addEventListener("click", () => {
+            settings.preset = key;
+            settings.colors = [...colors];
+            renderSettings();
+            queueUpdate();
+          });
+          $("presets").append(button);
+        }
+      }
+      $("add").addEventListener("click", () => {
+        if (settings.colors.length < 6) {
+          settings.colors.push("#ffffff");
+          settings.preset = "custom";
+          renderColors();
+          queueUpdate();
+        }
+      });
+      $("blend").addEventListener("change", () => {
+        settings.blend = $("blend").value;
+        queueUpdate();
+      });
+      $("reverse").addEventListener("change", () => {
+        settings.reverse = $("reverse").checked;
+        queueUpdate();
+      });
+      for (const key of ["brightness", "saturation"]) {
+        $(key).addEventListener("input", () => {
+          settings[key] = Number($(key).value) / 100;
+          $(key + "-value").value = $(key).value + "%";
+          queueUpdate();
+        });
+      }
+      $("reset").addEventListener("click", () => {
+        settings = {
+          preset: "rainbow",
+          colors: [...presets.rainbow],
+          blend: "gradient",
+          brightness: 1,
+          saturation: 1,
+          reverse: false,
+        };
+        renderSettings();
+        queueUpdate();
+      });
+      async function poll() {
+        const version = editVersion;
+        try {
+          const data = await request("/api/state");
+          if (!settings) {
+            presets = data.presets;
+            settings = data.settings;
+            buildPresets();
+            renderSettings();
+            $("controls").disabled = false;
+          }
+          if (!pending && !sending && version === editVersion) {
+            if (revision !== data.revision) {
+              settings = data.settings;
+              revision = data.revision;
+              renderSettings();
+            }
+            draw(data);
+            status("● Live · palette synced");
+          }
+          if (pending && !sending) flush();
+        } catch (error) {
+          status("Disconnected · waiting for visualizer", "error");
+        }
+        setTimeout(poll, 150);
+      }
+      poll();
+    </script>
+  </body>
+</html>

@@ -47,7 +47,7 @@ for the 30 FPS MP4 versions. [Rebuild the previews](docs/development.md#readme-p
 
 ## Quick start
 
-Use Python 3.10 or newer. Live system audio requires **macOS 13+** and Apple's
+Use Python 3.10 or newer. Live system audio requires **macOS 14.2+** and Apple's
 Command Line Tools. Video conversion and preview generation require **FFmpeg**.
 
 ```bash
@@ -67,7 +67,8 @@ start the audio wave:
 ./start.sh --style wave
 ```
 
-Allow **Screen & System Audio Recording** for your terminal when macOS asks.
+Allow **System Audio Recording Only** for your terminal when macOS asks.
+Screen recording permission is not needed.
 For later runs, skip the upload with `./start.sh --no-upload --style wave`.
 Running `./start.sh` without a style selects the spectrum.
 

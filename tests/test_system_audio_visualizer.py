@@ -3,6 +3,7 @@ import unittest
 
 import numpy as np
 
+from audio_palette_controls import PaletteControls, default_settings
 from export_arduino import encode_rgb565
 from system_audio_visualizer import (
     DEFAULT_SENSITIVITY,
@@ -44,28 +45,37 @@ class AudioVisualizerTests(unittest.TestCase):
         self.assertEqual(args.sensitivity, DEFAULT_SENSITIVITY)
         self.assertGreater(int(boosted_frame.max()), int(normal_frame.max()))
 
-    def test_palette_is_one_smooth_blue_purple_red_gradient(self):
+    def test_default_palette_spans_the_rainbow(self):
         palette = color_palette()
+        self.assertEqual(palette.shape, (GRID_SIZE, 3))
+        self.assertEqual(palette.dtype, np.uint8)
+        np.testing.assert_array_equal(palette[0], [255, 0, 0])
+        np.testing.assert_array_equal(palette[-1], [255, 0, 255])
+        hues = np.array([
+            colorsys.rgb_to_hsv(*(color.astype(float) / 255.0))[0]
+            for color in palette
+        ])
+        np.testing.assert_allclose(hues, np.linspace(0, 5 / 6, GRID_SIZE), atol=0.002)
+        self.assertFalse(build_parser().parse_args([]).no_controls)
 
-        self.assertGreater(int(palette[0, 2]), 150)
-        self.assertGreater(int(palette[0, 2]), int(palette[0, 0]) * 5)
-        self.assertGreater(int(palette[GRID_SIZE // 2, 0]), 150)
-        self.assertLess(int(palette[GRID_SIZE // 2, 1]), 30)
-        self.assertGreater(int(palette[GRID_SIZE // 2, 2]), 180)
-        self.assertGreater(int(palette[-1, 0]), 240)
-        self.assertLess(int(palette[-1, 1]), 30)
-        self.assertLess(int(palette[-1, 2]), 30)
-
-        adjacent_steps = np.abs(np.diff(palette.astype(int), axis=0))
-        self.assertLess(int(adjacent_steps.max()), 100)
-        hues = np.array(
-            [
-                colorsys.rgb_to_hsv(*(color.astype(float) / 255.0))[0]
-                for color in palette
-            ]
-        )
-        unwrapped_hues = np.unwrap(hues * 2.0 * np.pi) / (2.0 * np.pi)
-        self.assertTrue(np.all(np.diff(unwrapped_hues) > 0.0))
+    def test_live_palette_recolors_both_styles_and_clears_old_trails(self):
+        for style in ("wave", "spectrum"):
+            with self.subTest(style=style):
+                controls = PaletteControls()
+                visualizer = AudioVisualizer(style, controls=controls)
+                samples = self.tone(0.7, 440)
+                for _ in range(8):
+                    visualizer.render(samples)
+                settings = default_settings()
+                settings.update(preset="custom", colors=["#00ff00"])
+                controls.update(settings)
+                frame = visualizer.render(samples)
+                self.assertTrue(np.any(frame[:, :, 1]))
+                self.assertFalse(np.any(frame[:, :, [0, 2]]))
+                np.testing.assert_array_equal(controls.state()["frame"], frame)
+                settings["brightness"] = 0
+                controls.update(settings)
+                self.assertFalse(np.any(visualizer.render(samples)))
 
     def test_spectrum_is_brightest_on_x_axis_and_fades_to_black(self):
         visualizer = AudioVisualizer("spectrum")

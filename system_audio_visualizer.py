@@ -4,18 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import colorsys
 import os
 import select
 import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 
+from audio_palette_controls import PaletteControls, PaletteServer, make_palette
 from export_arduino import encode_rgb565
 from stream_arduino import (
     DEFAULT_PORT_WAIT,
@@ -34,6 +35,7 @@ from stream_arduino import (
 
 ROOT = Path(__file__).resolve().parent
 CAPTURE_SOURCE = ROOT / "macos_system_audio.swift"
+CAPTURE_INFO = ROOT / "macos_system_audio.plist"
 CAPTURE_BINARY = ROOT / ".build" / "system_audio_capture"
 SAMPLE_RATE = 48_000
 GRID_SIZE = 16
@@ -55,18 +57,26 @@ def build_capture_helper() -> Path:
     """Compile the tiny native helper when it is missing or out of date."""
     if sys.platform != "darwin":
         raise RuntimeError("live system-audio capture is supported only on macOS")
-    if not CAPTURE_SOURCE.is_file():
-        raise RuntimeError(f"capture helper source is missing: {CAPTURE_SOURCE}")
+    for source in (CAPTURE_SOURCE, CAPTURE_INFO):
+        if not source.is_file():
+            raise RuntimeError(f"capture helper source is missing: {source}")
     if (
         CAPTURE_BINARY.is_file()
-        and CAPTURE_BINARY.stat().st_mtime >= CAPTURE_SOURCE.stat().st_mtime
+        and CAPTURE_BINARY.stat().st_mtime >= max(
+            CAPTURE_SOURCE.stat().st_mtime, CAPTURE_INFO.stat().st_mtime
+        )
     ):
         return CAPTURE_BINARY
 
     CAPTURE_BINARY.parent.mkdir(parents=True, exist_ok=True)
     print("Building the macOS system-audio helper (first run only)...", file=sys.stderr)
     result = subprocess.run(
-        ["xcrun", "swiftc", "-O", str(CAPTURE_SOURCE), "-o", str(CAPTURE_BINARY)],
+        [
+            "xcrun", "swiftc", "-O", str(CAPTURE_SOURCE),
+            "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",
+            "-Xlinker", "__info_plist", "-Xlinker", str(CAPTURE_INFO),
+            "-o", str(CAPTURE_BINARY),
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -78,7 +88,7 @@ def build_capture_helper() -> Path:
 
 
 class AudioCapture:
-    """Read mono Float32 samples from the native ScreenCaptureKit helper."""
+    """Read mono Float32 samples from the native Core Audio tap helper."""
 
     def __init__(self, capacity: int = SAMPLE_RATE) -> None:
         self._samples = np.zeros(capacity, dtype=np.float32)
@@ -103,7 +113,7 @@ class AudioCapture:
         if not ready:
             self.close()
             raise RuntimeError(
-                "timed out waiting for Screen & System Audio Recording permission"
+                "timed out waiting for System Audio Recording Only permission"
             )
         message = self._process.stderr.readline().decode(errors="replace").strip()
         if message != "READY":
@@ -111,8 +121,10 @@ class AudioCapture:
             detail = message.removeprefix("error: ") or "capture helper stopped"
             raise RuntimeError(
                 f"could not capture Mac system audio: {detail}. In System Settings, "
-                "allow your terminal under Privacy & Security > Screen & System "
-                "Audio Recording, then run this command again"
+                "allow the app that launched the visualizer (Terminal for the "
+                "command-line launcher) under Privacy & Security > Screen & "
+                "System Audio Recording > System Audio Recording Only, then "
+                "restart that app. Screen recording access is not required"
             )
 
         self._reader = threading.Thread(
@@ -181,37 +193,14 @@ class AudioCapture:
 
 
 def color_palette() -> np.ndarray:
-    """Return one smooth dark-blue through purple to red X-axis gradient."""
-    stops = (
-        (0.00, (0.65, 0.93, 0.72)),  # dark blue
-        (1.00, (0.00, 1.00, 1.00)),  # red
-    )
-    colors = []
-    for column in range(GRID_SIZE):
-        position = column / (GRID_SIZE - 1)
-        for (left_position, left), (right_position, right) in zip(
-            stops, stops[1:]
-        ):
-            if position <= right_position:
-                amount = (position - left_position) / (
-                    right_position - left_position
-                )
-                left_hue, left_saturation, left_value = left
-                right_hue, right_saturation, right_value = right
-                hue_delta = (right_hue - left_hue + 0.5) % 1.0 - 0.5
-                hue = (left_hue + hue_delta * amount) % 1.0
-                saturation = left_saturation + (
-                    right_saturation - left_saturation
-                ) * amount
-                value = left_value + (right_value - left_value) * amount
-                colors.append(colorsys.hsv_to_rgb(hue, saturation, value))
-                break
-    return np.rint(np.asarray(colors) * 255).clip(0, 255).astype(np.uint8)
+    """Return the default full rainbow across the X axis."""
+    return make_palette(size=GRID_SIZE)
 
 
 class AudioVisualizer:
     def __init__(
-        self, style: str, sensitivity: float = DEFAULT_SENSITIVITY
+        self, style: str, sensitivity: float = DEFAULT_SENSITIVITY,
+        controls: PaletteControls | None = None,
     ) -> None:
         if style not in {"spectrum", "wave"}:
             raise ValueError("style must be 'spectrum' or 'wave'")
@@ -220,6 +209,8 @@ class AudioVisualizer:
         self.style = style
         self.sensitivity = sensitivity
         self.palette = color_palette()
+        self.controls = controls
+        self._palette_revision = -1
         self.levels = np.zeros(GRID_SIZE, dtype=np.float32)
         self.previous = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.float32)
         self.window = np.hanning(FFT_SIZE).astype(np.float32)
@@ -246,6 +237,13 @@ class AudioVisualizer:
         return 0.06 + 0.94 * self.volume_level**1.35
 
     def render(self, samples: np.ndarray) -> np.ndarray:
+        if self.controls is not None:
+            revision, palette = self.controls.palette_snapshot()
+            if revision != self._palette_revision:
+                self.palette = palette
+                self._palette_revision = revision
+                # Old colors must not linger after a live palette/brightness edit.
+                self.previous.fill(0)
         if self.style == "spectrum":
             fresh = self._render_spectrum(samples)
         else:
@@ -255,7 +253,10 @@ class AudioVisualizer:
         frame_decay = 0.70 - 0.30 * self.volume_level
         self.previous *= frame_decay
         self.previous = np.maximum(self.previous, fresh.astype(np.float32))
-        return np.rint(self.previous).clip(0, 255).astype(np.uint8)
+        frame = np.rint(self.previous).clip(0, 255).astype(np.uint8)
+        if self.controls is not None:
+            self.controls.publish_frame(frame)
+        return frame
 
     def _render_spectrum(self, samples: np.ndarray) -> np.ndarray:
         signal = samples[-FFT_SIZE:].astype(np.float32, copy=True)
@@ -394,6 +395,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clear-on-exit", action="store_true", help="turn LEDs off on exit"
     )
+    parser.add_argument(
+        "--controls-port", type=int, default=8765,
+        help="local palette control port; 0 picks a free port (default: 8765)",
+    )
+    parser.add_argument(
+        "--no-controls", action="store_true", help="disable live palette controls",
+    )
+    parser.add_argument(
+        "--no-browser", action="store_true", help="print the controls URL without opening a browser",
+    )
     return parser
 
 
@@ -410,16 +421,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.retries < 0:
         raise SystemExit("error: --retries cannot be negative")
 
+    if not 0 <= args.controls_port <= 65535:
+        raise SystemExit("error: --controls-port must be between 0 and 65535")
+
     capture = AudioCapture()
+    controls = None if args.no_controls else PaletteControls()
+    control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
     try:
         print(
             "Requesting access to the Mac's system audio. If prompted, allow "
-            "Screen & System Audio Recording...",
+            "System Audio Recording Only (screen access is not required)...",
             file=sys.stderr,
         )
         capture.start()
-        visualizer = AudioVisualizer(args.style, args.sensitivity)
+        visualizer = AudioVisualizer(args.style, args.sensitivity, controls)
         source = FrameSource(
             fps=args.fps,
             iter_frames=lambda: iter_audio_frames(capture, visualizer),
@@ -435,6 +451,15 @@ def main(argv: list[str] | None = None) -> int:
             f"{source.fps:g} FPS. Ctrl-C stops.",
             file=sys.stderr,
         )
+        if controls is not None:
+            control_server = PaletteServer(controls, args.controls_port)
+            control_server.start()
+            print(f"Live palette controls: {control_server.url}", file=sys.stderr)
+            if not args.no_browser:
+                try:
+                    webbrowser.open(control_server.url)
+                except webbrowser.Error:
+                    print("Open the controls URL in your browser.", file=sys.stderr)
         stream_frames(
             connection,
             source,
@@ -451,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
+        if control_server is not None:
+            control_server.close()
         capture.close()
         if connection is not None:
             if args.clear_on_exit:
