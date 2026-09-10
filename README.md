@@ -20,20 +20,20 @@ The video converter also supports **48×48** grids.
       <br><a href="docs/assets/lava-lamp.mp4">Watch the MP4</a>
     </td>
     <td align="center" width="50%">
-      <a href="docs/assets/audio-wave.mp4">
-        <img src="docs/assets/audio-wave.gif" width="258" alt="16×16 blue-to-red oscilloscope wave growing and fading with changing audio levels">
+      <a href="docs/assets/audio-spectrum.mp4">
+        <img src="docs/assets/audio-spectrum.gif" width="258" alt="16×16 rainbow spectrum with mirrored frequency bars reacting to recorded Mac system audio">
       </a>
-      <br><strong>Live audio wave</strong>
-      <br>Wave shape and glow follow the sound.
-      <br><a href="docs/assets/audio-wave.mp4">Watch the MP4</a>
+      <br><strong>Live audio spectrum</strong>
+      <br>Rainbow frequency bars follow the music.
+      <br><a href="docs/assets/audio-spectrum.mp4">Watch with sound</a>
     </td>
   </tr>
 </table>
 
-These looping previews use the actual live renderers. The wave is driven by
-synthetic tones with changing volume; the lava is a seeded fluid simulation.
-They are recorded demonstrations, not a live connection to a panel. Click
-for the 30 FPS MP4 versions. [Rebuild the previews](docs/development.md#readme-previews).
+The spectrum uses real Mac system audio recorded during playback and the same
+rainbow spectrum renderer as the board. Its MP4 includes the recorded sound;
+the inline GIF is silent. The lava is a seeded fluid simulation. Both are
+recorded previews. [Rebuild the previews](docs/development.md#readme-previews).
 
 ## What you can run
 

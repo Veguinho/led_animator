@@ -19,11 +19,11 @@ output/
 *.mov
 *_animation.h
 
-# Only the small, reproducible README demos are versioned.
+# Only the small README previews are versioned.
 !docs/assets/lava-lamp.gif
 !docs/assets/lava-lamp.mp4
-!docs/assets/audio-wave.gif
-!docs/assets/audio-wave.mp4
+!docs/assets/audio-spectrum.gif
+!docs/assets/audio-spectrum.mp4
 
 # Local source videos can also be large; retain only the folder itself.
 video_clips/*

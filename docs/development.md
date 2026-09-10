@@ -29,7 +29,7 @@ python3 -m unittest discover -s tests -v
 Install the usual Python requirements and FFmpeg, then run:
 
 ```bash
-python3 scripts/render_readme_previews.py
+python3 scripts/render_readme_previews.py --audio-file output/system-audio.wav
 ```
 
 This regenerates the four small files in `docs/assets/`: one 16-second,
@@ -38,15 +38,26 @@ in the README; each links to its MP4. The frames use the existing circular
 LED renderer at 258×258 pixels.
 
 Lava uses `LavaLampFluid` with seed 2026, the default 48×48 solver, and a
-15-second warmup. The audio preview feeds synthetic tones at 48 kHz into
-`AudioVisualizer("wave")` with default sensitivity. It exercises quiet and
-loud passages without recording music or accessing system audio.
+15-second warmup. The spectrum preview feeds an actual audio recording,
+decoded to mono 48 kHz, into `AudioVisualizer("spectrum")` with the default
+rainbow palette and sensitivity. The trailing FFT windows follow the recorded
+audio timeline, and the MP4 includes that same soundtrack. The GIF is silent.
+The checked-in spectrum is a screen recording of that rendered spectrum,
+driven by Mac system audio captured during playback on September 10, 2026.
+The recording is cropped to the preview window and paired with the captured
+soundtrack. Rebuilding produces the same renderer's frames directly.
+
+Provide at least 16 seconds of real recorded audio; synthetic tones are no
+longer used. Keep the original recording in ignored `output/`. To regenerate
+just the spectrum, add `--audio-only`. To regenerate just lava without an
+audio recording, use `--lava-only`.
 
 These are software previews: the physical panel also quantizes frames to
 RGB565 and applies the firmware brightness and power limits.
 
-No board, serial connection, macOS capture permissions, or source video is
-needed. Review the resulting motion and file sizes before committing.
+Rendering from an existing audio file needs no board or capture permissions.
+Recording new system audio requires macOS audio capture permission.
+Review the resulting motion, audio, and file sizes before committing.
 Keep future previews short; ordinary generated media belongs in the ignored
 `output/` directory. Local input videos belong in `video_clips/`.
 
