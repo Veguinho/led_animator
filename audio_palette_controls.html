@@ -214,53 +214,10 @@
         font-size: 12px;
       }
       .motion-control {
-        display: flex;
-        align-items: center;
-        gap: 24px;
         margin-bottom: 24px;
       }
-      .knob {
-        --sweep: 0deg;
-        --angle: -135deg;
-        position: relative;
-        flex: 0 0 96px;
-        width: 96px;
-        height: 96px;
-        padding: 0;
-        border: 0;
-        border-radius: 50%;
-        background: conic-gradient(from 225deg, var(--accent) 0deg var(--sweep),
-          var(--line) var(--sweep) 270deg, transparent 270deg);
-        touch-action: none;
-        user-select: none;
-        cursor: ns-resize;
-      }
-      .knob::before {
-        content: "";
-        position: absolute;
-        inset: 7px;
-        border: 1px solid #484852;
-        border-radius: 50%;
-        background: linear-gradient(145deg, #383842, #1b1b22);
-        box-shadow: 0 4px 10px #0008;
-      }
-      .knob::after {
-        content: "";
-        position: absolute;
-        width: 4px;
-        height: 16px;
-        left: 46px;
-        top: 16px;
-        border-radius: 3px;
-        background: var(--accent);
-        transform-origin: 2px 32px;
-        transform: rotate(var(--angle));
-      }
-      #slowdown-value {
-        display: block;
-        color: var(--accent);
-        font-size: 24px;
-        margin: 6px 0;
+      .motion-control .range-label {
+        margin-top: 0;
       }
       .range-label {
         display: flex;
@@ -390,16 +347,13 @@
         <section class="card" aria-label="Visualization controls">
           <fieldset id="controls" disabled>
             <div class="motion-control">
-              <button id="slowdown" class="knob" type="button" role="slider"
-                aria-labelledby="slowdown-label" aria-describedby="slowdown-help"
-                aria-valuemin="0" aria-valuemax="95" aria-valuenow="0"
-                aria-valuetext="0% slowdown, full speed"></button>
-              <div>
-                <h2 id="slowdown-label">Slowdown</h2>
-                <output id="slowdown-value" for="slowdown">0%</output>
-                <p id="slowdown-help">Drag up to slow the motion, down to speed it up.
-                  Arrow keys also work. Frames blend smoothly in between.</p>
-              </div>
+              <label for="slowdown" class="range-label">
+                Slowdown <output id="slowdown-value" for="slowdown">0%</output>
+              </label>
+              <input id="slowdown" type="range" min="0" max="95" step="1" value="0"
+                aria-describedby="slowdown-help" aria-valuetext="0% slowdown, full speed" />
+              <p id="slowdown-help">Slide right to slow the motion, left to speed it up.
+                Frames blend smoothly in between.</p>
             </div>
             <div class="divider"></div>
             <h2>Color combinations</h2>
@@ -613,10 +567,7 @@
       }
       function renderSlowdown() {
         const value = settings.slowdown;
-        const sweep = value / 95 * 270;
-        $("slowdown").style.setProperty("--sweep", sweep + "deg");
-        $("slowdown").style.setProperty("--angle", (sweep - 135) + "deg");
-        $("slowdown").setAttribute("aria-valuenow", value);
+        $("slowdown").value = value;
         $("slowdown").setAttribute("aria-valuetext", `${value}% slowdown, ${100 - value}% speed`);
         $("slowdown-value").value = value + "%";
       }
@@ -626,28 +577,8 @@
         renderSlowdown();
         queueUpdate();
       }
-      let knobDrag = null;
-      $("slowdown").addEventListener("pointerdown", (event) => {
-        if (!settings || $("controls").disabled || event.button !== 0) return;
-        knobDrag = { id: event.pointerId, y: event.clientY, value: settings.slowdown };
-        $("slowdown").setPointerCapture(event.pointerId);
-        $("slowdown").focus();
-        event.preventDefault();
-      });
-      $("slowdown").addEventListener("pointermove", (event) => {
-        if (!knobDrag || event.pointerId !== knobDrag.id) return;
-        setSlowdown(knobDrag.value + (knobDrag.y - event.clientY) / 2);
-      });
-      for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
-        $("slowdown").addEventListener(event, () => { knobDrag = null; });
-      }
-      $("slowdown").addEventListener("keydown", (event) => {
-        if (!settings || $("controls").disabled) return;
-        const step = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1,
-          PageUp: 10, PageDown: -10 }[event.key];
-        if (step === undefined && event.key !== "Home" && event.key !== "End") return;
-        event.preventDefault();
-        setSlowdown(event.key === "Home" ? 0 : event.key === "End" ? 95 : settings.slowdown + step);
+      $("slowdown").addEventListener("input", () => {
+        setSlowdown(Number($("slowdown").value));
       });
       function queueUpdate() {
         editVersion++;

@@ -98,16 +98,16 @@ saturation. All changes apply to the next audio frame in either style, with a
 live 16×16 preview. **Reset defaults** restores the rainbow palette and full
 animation speed. Settings are not saved between runs.
 
-The **Slowdown** knob reduces how often the animation advances while keeping
-the configured LED output rate. Drag up to increase the slowdown and down to
-decrease it, or focus the knob and use the arrow keys. Home selects 0%; End
+The **Slowdown** slider reduces how often the animation advances while keeping
+the configured LED output rate. Slide right to increase the slowdown and left to
+decrease it, or focus the slider and use the arrow keys. Home selects 0%; End
 selects 95%. Intermediate frames blend smoothly between the new animation
 frames, and the preview shows those blended frames too.
 
 At the default 30 FPS, 50% slowdown creates 15 new animation frames per second
 and blends between them to keep sending 30 frames. At a configured 60 FPS,
 the same setting would create 30 new frames and send 60. The current USB setup
-still defaults to 30 FPS for reliable streaming; the knob does not change the
+still defaults to 30 FPS for reliable streaming; the slider does not change the
 serial speed or firmware. A higher slowdown makes reactions more gradual,
 but keeps sampling current audio instead of building an audio backlog.
 
