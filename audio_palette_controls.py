@@ -7,6 +7,8 @@ import copy
 import json
 import re
 import threading
+import uuid
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -125,8 +127,15 @@ class PaletteControls:
 
 
 class PaletteServer:
-    def __init__(self, controls: PaletteControls, port: int = 8765) -> None:
+    def __init__(
+        self, controls: PaletteControls, port: int = 8765,
+        on_refresh: Callable[[], None] | None = None,
+    ) -> None:
         page = Path(__file__).with_name("audio_palette_controls.html").read_bytes()
+        session = uuid.uuid4().hex
+
+        def state() -> dict:
+            return controls.state() | {"session": session, "refresh_available": on_refresh is not None}
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:
@@ -148,12 +157,12 @@ class PaletteServer:
                 if self.path == "/":
                     self.respond(200, page, "text/html; charset=utf-8")
                 elif self.path == "/api/state":
-                    self.json_response(200, controls.state())
+                    self.json_response(200, state())
                 else:
                     self.json_response(404, {"error": "not found"})
 
             def do_POST(self) -> None:
-                if self.path != "/api/palette":
+                if self.path not in ("/api/palette", "/api/refresh"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
@@ -168,18 +177,32 @@ class PaletteServer:
                     length = int(self.headers.get("Content-Length", "0"))
                     if not 0 < length <= 4096:
                         raise ValueError("invalid request size")
-                    controls.update(json.loads(self.rfile.read(length)))
+                    payload = json.loads(self.rfile.read(length))
+                    if self.path == "/api/refresh":
+                        if payload != {}:
+                            raise ValueError("refresh expects an empty JSON object")
+                    else:
+                        controls.update(payload)
                 except (ValueError, UnicodeError) as exc:
                     self.json_response(400, {"error": str(exc)})
                     return
-                self.json_response(200, controls.state())
+                if self.path == "/api/refresh":
+                    if on_refresh is None:
+                        self.json_response(503, {"error": "refresh is unavailable in this preview"})
+                        return
+                    self.json_response(202, {"restarting": True, "session": session})
+                    self.wfile.flush()
+                    on_refresh()
+                    return
+                self.json_response(200, state())
 
             def setup(self) -> None:
                 super().setup()
                 self.connection.settimeout(2)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        self.port = self._server.server_port
+        self.url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="palette-controls", daemon=True
         )

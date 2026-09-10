@@ -127,6 +127,13 @@ without the interface. The panel uses Python's standard library and is available
 only on this Mac. An already-running visualizer needs a restart to load the new
 controls.
 
+Click **Refresh app** at the top of the controls page to restart the visualizer
+and reload the page in the same tab. The button briefly pauses the LEDs, closes
+the audio and USB connections, then loads the current code and reconnects.
+Live edits reset to the startup settings. The Dock launcher remains active to
+prevent a second stream from starting during the refresh. If the app has stopped
+completely, launch it from the Dock again.
+
 Both styles follow the audio level in dBFS: loud passages grow and glow more,
 while quiet passages stay smaller and dimmer.
 

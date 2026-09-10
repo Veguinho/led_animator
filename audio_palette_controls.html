@@ -88,6 +88,12 @@
         white-space: nowrap;
         color: var(--muted);
       }
+      .header-actions {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 14px;
+      }
       .status[data-state="live"] {
         color: #9de5bd;
       }
@@ -372,8 +378,12 @@
           <h1>Live palette</h1>
           <p>Shape the colors and motion. Let the music do the rest.</p>
         </div>
-        <div id="status" class="status" role="status" aria-live="polite">
-          Connecting…
+        <div class="header-actions">
+          <div id="status" class="status" role="status" aria-live="polite">Connecting…</div>
+          <button id="refresh" type="button" class="small" disabled
+            title="Restart the visualizer and reload this page. Settings reset to defaults.">
+            ↻ Refresh app
+          </button>
         </div>
       </header>
       <div class="layout">
@@ -490,6 +500,8 @@
         revision = -1,
         pending = null,
         sending = false,
+        refreshing = false,
+        refreshError = null,
         editVersion = 0;
       const context = $("preview").getContext("2d");
       function status(message, state = "live") {
@@ -644,7 +656,7 @@
         flush();
       }
       async function flush() {
-        if (sending || !pending) return;
+        if (refreshing || sending || !pending) return;
         sending = true;
         const next = pending;
         pending = null;
@@ -654,10 +666,12 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(next),
           });
+          if (refreshing) { sending = false; return; }
           revision = data.revision;
           draw(data);
           if (!pending) status("● Live · controls synced");
         } catch (error) {
+          if (refreshing) { sending = false; return; }
           // Keep the latest edit for the next poll to retry after reconnection.
           if (!pending) pending = next;
           status("Disconnected · retrying changes", "error");
@@ -723,10 +737,52 @@
         renderSettings();
         queueUpdate();
       });
+      $("refresh").addEventListener("click", async () => {
+        if (refreshing) return;
+        refreshing = true;
+        refreshError = null;
+        pending = null;
+        $("controls").disabled = true;
+        $("refresh").disabled = true;
+        $("refresh").textContent = "Refreshing…";
+        status("Restarting visualizer…", "pending");
+        try {
+          const previous = await request("/api/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const deadline = Date.now() + 45000;
+          while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            let current;
+            try { current = await request("/api/state"); } catch { continue; }
+            if (current.session && current.session !== previous.session) {
+              window.location.reload();
+              return;
+            }
+          }
+          throw new Error("Could not reconnect. Relaunch the app from the Dock.");
+        } catch (error) {
+          refreshing = false;
+          sending = false;
+          refreshError = error.message;
+          $("refresh").disabled = false;
+          $("refresh").textContent = "↻ Refresh app";
+          status(error.message, "error");
+        }
+      });
       async function poll() {
+        if (refreshing) {
+          setTimeout(poll, 250);
+          return;
+        }
         const version = editVersion;
         try {
           const data = await request("/api/state");
+          if (refreshing) { setTimeout(poll, 250); return; }
+          $("refresh").disabled = !data.refresh_available;
+          $("controls").disabled = false;
           if (!settings) {
             presets = data.presets;
             settings = data.settings;
@@ -741,11 +797,13 @@
               renderSettings();
             }
             draw(data);
-            status("● Live · controls synced");
+            if (refreshError) status(refreshError, "error");
+            else status("● Live · controls synced");
           }
           if (pending && !sending) flush();
         } catch (error) {
           status("Disconnected · waiting for visualizer", "error");
+          $("refresh").disabled = true;
         }
         setTimeout(poll, 33);
       }

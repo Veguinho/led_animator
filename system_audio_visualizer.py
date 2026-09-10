@@ -387,10 +387,17 @@ class AudioVisualizer:
         return frame
 
 
+class RefreshRequested(Exception):
+    """Return control to the main thread so it can clean up before restarting."""
+
+
 def iter_audio_frames(
-    capture: AudioCapture, visualizer: AudioVisualizer
+    capture: AudioCapture, visualizer: AudioVisualizer,
+    refresh_requested: threading.Event | None = None,
 ) -> Iterator[bytes]:
     while True:
+        if refresh_requested is not None and refresh_requested.is_set():
+            raise RefreshRequested()
         yield encode_rgb565(visualizer.render(capture.latest(FFT_SIZE)))
 
 
@@ -475,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     controls = None if args.no_controls else PaletteControls(slowdown=args.slowdown)
     control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
+    refresh_requested = threading.Event()
     try:
         print(
             "Requesting access to the Mac's system audio. If prompted, allow "
@@ -485,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
         visualizer = AudioVisualizer(args.style, args.sensitivity, controls, args.slowdown)
         source = FrameSource(
             fps=args.fps,
-            iter_frames=lambda: iter_audio_frames(capture, visualizer),
+            iter_frames=lambda: iter_audio_frames(capture, visualizer, refresh_requested),
         )
         port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port}...", file=sys.stderr)
@@ -499,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         if controls is not None:
-            control_server = PaletteServer(controls, args.controls_port)
+            control_server = PaletteServer(controls, args.controls_port, on_refresh=refresh_requested.set)
             control_server.start()
             print(f"Live palette controls: {control_server.url}", file=sys.stderr)
             if not args.no_browser:
@@ -516,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
             drop_late=True,
         )
         return 0
+    except RefreshRequested:
+        print("Refreshing the app...", file=sys.stderr)
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
         return 130
@@ -541,6 +551,27 @@ def main(argv: list[str] | None = None) -> int:
                 except (OSError, RuntimeError):
                     pass
             connection.close()
+
+    # The old HTTP server, audio tap and serial connection are all closed.
+    # Keep the actual controls port (including --controls-port 0) so the
+    # existing browser tab reconnects; reload Python code without opening a tab.
+    assert control_server is not None
+    args.controls_port = control_server.port
+    args.no_browser = True
+    restart_args = []
+    for name, value in vars(args).items():
+        flag = "--" + name.replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                restart_args.append(flag)
+        else:
+            restart_args.extend([flag, str(value)])
+    try:
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *restart_args])
+    except OSError as exc:
+        print(f"error: could not restart the app: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
