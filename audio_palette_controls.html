@@ -359,6 +359,8 @@
             <h2>Color combinations</h2>
             <p>Pick a starting point, then make it yours.</p>
             <div id="presets" class="presets"></div>
+            <p id="palette-motion" hidden>Colors flow across the panel. Slowdown controls
+              their speed; Reverse direction changes their travel direction.</p>
             <div class="label">
               <h2 id="palette-name">Rainbow</h2>
               <button id="add" class="small" type="button">+ Add color</button>
@@ -442,6 +444,7 @@
       const $ = (id) => document.getElementById(id);
       const names = {
         rainbow: "Rainbow",
+        "moving-rainbow": "Moving rainbow",
         "blue-red": "Blue → red",
         sunset: "Sunset",
         ocean: "Ocean",
@@ -492,6 +495,8 @@
       }
       function markSelection() {
         $("palette-name").textContent = names[settings.preset];
+        $("blend").disabled = settings.preset === "moving-rainbow";
+        $("palette-motion").hidden = settings.preset !== "moving-rainbow";
         document
           .querySelectorAll(".preset")
           .forEach((button) =>
@@ -626,6 +631,7 @@
           button.addEventListener("click", () => {
             settings.preset = key;
             settings.colors = [...colors];
+            if (key === "moving-rainbow") settings.blend = "gradient";
             renderSettings();
             queueUpdate();
           });

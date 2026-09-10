@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from audio_palette_controls import PaletteControls, PaletteServer, make_palette, validate_slowdown
+from audio_palette_controls import PaletteControls, PaletteServer, default_settings, make_palette, validate_slowdown
 from export_arduino import encode_rgb565
 from stream_arduino import (
     DEFAULT_PORT_WAIT,
@@ -43,6 +43,7 @@ FFT_SIZE = 2_048
 MIN_DBFS = -72.0
 MAX_DBFS = -6.0
 DEFAULT_SENSITIVITY = 1.5
+RAINBOW_CYCLE_SECONDS = 8.0
 
 
 def amplitude_to_level(amplitude: float, sensitivity: float = 1.0) -> float:
@@ -245,6 +246,10 @@ class AudioVisualizer:
         self.palette = color_palette()
         self.controls = controls
         self._palette_revision = -1
+        self._settings = default_settings()
+        self._moving_rainbow = False
+        self._rainbow_phase = 0.0
+        self._last_color_time: float | None = None
         self.levels = np.zeros(GRID_SIZE, dtype=np.float32)
         self.previous = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.float32)
         self.window = np.hanning(FFT_SIZE).astype(np.float32)
@@ -271,18 +276,38 @@ class AudioVisualizer:
         return 0.06 + 0.94 * self.volume_level**1.35
 
     def render(self, samples: np.ndarray) -> np.ndarray:
+        now = time.monotonic()
+        elapsed = 0.0 if self._last_color_time is None else max(0.0, now - self._last_color_time)
+        self._last_color_time = now
         if self.controls is not None:
-            revision, palette, self.slowdown = self.controls.palette_snapshot()
+            revision, settings = self.controls.settings_snapshot()
             if revision != self._palette_revision:
                 self._palette_revision = revision
-                if not np.array_equal(self.palette, palette):
-                    self.palette = palette
+                self.slowdown = settings["slowdown"]
+                changed = any(settings[key] != self._settings[key] for key in settings if key != "slowdown")
+                if settings["preset"] != self._settings["preset"]:
+                    self._rainbow_phase = 0.0
+                    elapsed = 0.0
+                self._settings = settings
+                if changed:
+                    self._moving_rainbow = settings["preset"] == "moving-rainbow"
+                    # Animate a neutral brightness mask, then color it at the
+                    # output cadence so even heavily slowed frames keep flowing.
+                    self.palette = (np.full((GRID_SIZE, 3), 255, dtype=np.uint8)
+                                    if self._moving_rainbow else make_palette(settings))
                     # Color edits apply immediately, even mid-transition.
                     self.previous.fill(0)
                     self._delayer.reset()
         frame = self._delayer.render(lambda: self._render_frame(samples), self.slowdown)
+        display_palette = self.palette
+        if self._moving_rainbow:
+            self._rainbow_phase = (
+                self._rainbow_phase + elapsed * (1.0 - self.slowdown / 100.0) / RAINBOW_CYCLE_SECONDS
+            ) % 1.0
+            display_palette = make_palette(self._settings, phase=self._rainbow_phase)
+            frame = np.rint(frame.astype(np.float32) * display_palette[None, :, :] / 255.0).astype(np.uint8)
         if self.controls is not None:
-            self.controls.publish_frame(frame)
+            self.controls.publish_frame(frame, display_palette)
         return frame
 
     def _render_frame(self, samples: np.ndarray) -> np.ndarray:

@@ -98,6 +98,14 @@ saturation. All changes apply to the next audio frame in either style, with a
 live 16×16 preview. **Reset defaults** restores the rainbow palette and full
 animation speed. Settings are not saved between runs.
 
+Choose **Moving rainbow** for a continuous rainbow that travels smoothly
+from left to right across the X axis. It works with both wave and spectrum.
+The colors wrap around without a jump and complete one cycle in eight seconds
+at full speed. **Slowdown** slows both the animation and the color movement;
+**Reverse direction** makes the colors travel right to left. Brightness and
+saturation still apply, and silent audio stays dark. This preset always uses
+a smooth gradient. The original **Rainbow** preset keeps its colors stationary.
+
 The **Slowdown** slider reduces how often the animation advances while keeping
 the configured LED output rate. Slide right to increase the slowdown and left to
 decrease it, or focus the slider and use the arrow keys. Home selects 0%; End

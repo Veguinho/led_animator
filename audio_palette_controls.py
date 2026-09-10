@@ -17,6 +17,7 @@ import numpy as np
 
 PRESETS = {
     "rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
+    "moving-rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
     "blue-red": ["#0d1eb8", "#b800ff", "#ff0000"],
     "sunset": ["#ffbe0b", "#ff5400", "#ff006e", "#8338ec"],
     "ocean": ["#052c80", "#0077ff", "#00e5ff", "#80ffdb"],
@@ -56,6 +57,8 @@ def validate_settings(settings: object) -> dict:
     validate_slowdown(result["slowdown"])
     if result["preset"] != "custom":
         result["colors"] = PRESETS[result["preset"]].copy()
+        if result["preset"] == "moving-rainbow":
+            result["blend"] = "gradient"
     else:
         result["colors"] = [color.lower() for color in colors]
     return result
@@ -66,8 +69,17 @@ def validate_slowdown(value: object) -> None:
         raise ValueError("slowdown must be between 0 and 95 percent")
 
 
-def make_palette(settings: dict | None = None, size: int = 16) -> np.ndarray:
+def make_palette(settings: dict | None = None, size: int = 16, phase: float = 0.0) -> np.ndarray:
     settings = validate_settings(default_settings() if settings is None else settings)
+    if settings["preset"] == "moving-rainbow":
+        # A periodic hue wheel avoids a discontinuity between the panel edges.
+        # Fractional phase shifts colors smoothly, instead of rolling columns.
+        hues = (np.arange(size) / size - phase) % 1.0
+        palette = np.rint(np.array([
+            colorsys.hsv_to_rgb(float(hue), settings["saturation"], settings["brightness"])
+            for hue in hues
+        ]) * 255).clip(0, 255).astype(np.uint8)
+        return palette[::-1].copy() if settings["reverse"] else palette
     stops = np.array([
         [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
         for color in settings["colors"]
@@ -97,6 +109,7 @@ class PaletteControls:
         self._lock = threading.Lock()
         self._settings = validate_settings(default_settings() | {"slowdown": slowdown})
         self._palette = make_palette()
+        self._display_palette = self._palette.copy()
         self._revision = 0
         self._frame = np.zeros((16, 16, 3), dtype=np.uint8)
 
@@ -106,22 +119,29 @@ class PaletteControls:
         with self._lock:
             self._settings = validated
             self._palette = palette
+            self._display_palette = palette.copy()
             self._revision += 1
 
     def palette_snapshot(self) -> tuple[int, np.ndarray, float]:
         with self._lock:
             return self._revision, self._palette.copy(), self._settings["slowdown"]
 
-    def publish_frame(self, frame: np.ndarray) -> None:
+    def settings_snapshot(self) -> tuple[int, dict]:
+        with self._lock:
+            return self._revision, copy.deepcopy(self._settings)
+
+    def publish_frame(self, frame: np.ndarray, palette: np.ndarray | None = None) -> None:
         with self._lock:
             self._frame = frame.copy()
+            if palette is not None:
+                self._display_palette = palette.copy()
 
     def state(self) -> dict:
         with self._lock:
             return {
                 "settings": copy.deepcopy(self._settings),
                 "revision": self._revision,
-                "palette": self._palette.tolist(), "frame": self._frame.tolist(),
+                "palette": self._display_palette.tolist(), "frame": self._frame.tolist(),
                 "presets": copy.deepcopy(PRESETS),
             }
 
