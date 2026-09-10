@@ -68,7 +68,5 @@ Stop the audio stream with Ctrl+C before switching to lava or video mode.
 
 The sketch lives in
 [`cs2_16x16_player_firmware/`](../cs2_16x16_player_firmware/cs2_16x16_player_firmware.ino).
-Its historical folder name remains, but it receives live frames and contains
-no bundled animation. The separate
-[`ws2812_safe_test.ino/`](../ws2812_safe_test.ino/ws2812_safe_test.ino.ino)
-sketch is a basic LED test, not the streaming receiver.
+It receives live frames and contains no bundled animation. This is the
+firmware used by the audio, lava, and video streamers.

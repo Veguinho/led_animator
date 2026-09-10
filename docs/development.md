@@ -20,13 +20,32 @@ python3 -m unittest discover -s tests -v
 | `lava_lamp_stream.py` | Fluid solver and lava streaming |
 | `system_audio_visualizer.py` | Audio-wave and spectrum renderers |
 | `macos_system_audio.swift` | Native macOS system-audio capture helper |
+| `macos_system_audio.plist` | Audio capture permission description |
+| `audio_palette_controls.py` / `.html` | Local palette controls and live panel preview |
 | `start.sh` | Firmware upload and audio-stream launcher |
+| `scripts/install_macos_app.py` | Mac app installer and optional Dock shortcut |
+| `scripts/launch_audio_visualizer.py` | App entry point and duplicate-stream lock |
+| `Dockerfile` / `run_48_container.sh` | Resource-limited 48×48 video conversion |
 | `cs2_16x16_player_firmware/` | ESP32-S3 live receiver and physical panel mapping |
 | `scripts/render_readme_previews.py` | Reproducible documentation demos |
+| `tests/` | Audio, palette, lava, video conversion, export, and USB protocol tests |
+
+Only application code, launchers, firmware, documentation assets, and tests
+are versioned. Keep source videos in `video_clips/` and generated media in
+`output/`; both are ignored. The local `.venv/` contains installed dependencies,
+and `.build/` holds the compiled capture helper and the app's runtime lock.
 
 ## README previews
 
-Install the usual Python requirements and FFmpeg, then run:
+Install the usual Python requirements and FFmpeg. Use a fresh audio recording,
+or extract the soundtrack from the existing preview:
+
+```bash
+mkdir -p output
+ffmpeg -i docs/assets/audio-spectrum.mp4 -vn output/system-audio.wav
+```
+
+Then rebuild the previews:
 
 ```bash
 python3 scripts/render_readme_previews.py --audio-file output/system-audio.wav
@@ -60,9 +79,3 @@ Recording new system audio requires macOS audio capture permission.
 Review the resulting motion, audio, and file sizes before committing.
 Keep future previews short; ordinary generated media belongs in the ignored
 `output/` directory. Local input videos belong in `video_clips/`.
-
-The old showcase clips, binary animation, and generated
-`cs2_16x16_player/cs2_16x16_animation.h` have been removed from project history.
-After that history rewrite, existing clones should be replaced with a fresh
-clone after saving local work; merging an old branch can reintroduce those
-assets.

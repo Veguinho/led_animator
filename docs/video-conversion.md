@@ -102,8 +102,3 @@ RGB565 frames. The optional header embeds the same bytes in flash with
 `PROGMEM` for custom offline players. The included
 [streaming firmware](../cs2_16x16_player_firmware/cs2_16x16_player_firmware.ino) sketch uses live USB streaming instead, so it does
 not include this header.
-
-## Generate a procedural source clip
-
-The optional space-bounce generator is still available; its output is not
-bundled. See `python3 generate_space_bounce.py --help` for rendering options.
