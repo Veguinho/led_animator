@@ -84,7 +84,7 @@ or the microphone, and does not need screen recording permission. It compiles
 automatically on its first run and requires macOS 14.2 or newer plus Apple's
 Command Line Tools. Audio is converted to mono 48 kHz for the visualizer.
 
-The default is a rainbow oscilloscope wave. For mirrored frequency bars, use:
+The default is an Adaptive wave with 20% slowdown and 60% brightness. For mirrored frequency bars, use:
 
 ```bash
 python3 system_audio_visualizer.py --style spectrum
@@ -95,8 +95,7 @@ Once streaming starts, a **Live palette** panel opens in your browser at
 edit up to six colors with color pickers or hex codes; combine them as a smooth
 gradient or solid bands; reverse their order; and adjust brightness and
 saturation. All changes apply to the next audio frame in either style, with a
-live 16×16 preview. **Reset defaults** restores the rainbow palette and full
-animation speed. Settings are not saved between runs.
+live 16×16 preview. **Reset defaults** restores Adaptive, 20% slowdown, and 60% brightness. Settings are not saved between runs.
 
 Choose **Moving rainbow** for a continuous rainbow that travels smoothly
 from left to right across the X axis. It works with both wave and spectrum.
@@ -106,11 +105,40 @@ at full speed. **Slowdown** slows both the animation and the color movement;
 saturation still apply, and silent audio stays dark. This preset always uses
 a smooth gradient. The original **Rainbow** preset keeps its colors stationary.
 
+Choose **Adaptive** to follow the song's energy in either style. Energetic
+passages bring bright, saturated pinks, reds, oranges, and golds with cooler
+accents for variety. Calmer passages move toward a darker, less saturated version
+of **Ocean**, preserving its blue, cyan, and teal gradient.
+Adaptive smooths RMS energy and sample-peak power over 250 ms, then compares
+their dBFS levels with their maxima over the last 30 seconds.
+RMS carries 80% of the comparison and peak dBFS 20%,
+so isolated hits cannot make a sparse passage look like a sustained chorus.
+Passages around 6 dB below the reference tend toward Ocean; those within 2 dB
+reach the warm end. Reference floors and a quiet-audio gate keep near-silence
+from normalizing into high energy. Spectrum fullness adds color variety.
+Bass and treble do not directly choose warm or cold colors.
+Temperature, brightness, and saturation ease toward the current energy over
+time, avoiding abrupt switches on individual beats.
+**Slowdown** makes those transitions more gradual while colors keep updating
+between animation frames. Brightness, saturation, and reverse still apply.
+Silence gradually cools the palette while the LEDs fade out.
+
 The **Slowdown** slider reduces how often the animation advances while keeping
 the configured LED output rate. Slide right to increase the slowdown and left to
 decrease it, or focus the slider and use the arrow keys. Home selects 0%; End
 selects 95%. Intermediate frames blend smoothly between the new animation
 frames, and the preview shows those blended frames too.
+
+In **wave** mode, any slowdown above 0% draws a flowing sine and cosine pair.
+Higher slowdown makes the strokes thicker and their motion slower, while the
+music still controls their height and brightness. At 0%, wave mode returns to
+the original live audio waveform.
+
+Strong audio can reach the top and bottom LED rows in both wave and spectrum
+modes. Spectrum bars have 25% more vertical reach and stay brightest at the
+center, with visible edges when a band reaches full height. A faint background
+uses all 256 LEDs while audio plays and fades out in silence. The brightness
+slider controls light intensity; audio levels control the drawing height.
 
 At the default 30 FPS, 50% slowdown creates 15 new animation frames per second
 and blends between them to keep sending 30 frames. At a configured 60 FPS,
@@ -171,7 +199,7 @@ Install the launcher in your personal Applications folder and pin it to the Dock
 
 Connect the board by USB, then click **LED Audio Visualizer** in the Dock (or
 double-click `~/Applications/LED Audio Visualizer.app`). A Terminal window starts
-the spectrum with the default rainbow palette, and the live color controls open
+the spectrum with Adaptive, 20% slowdown, and 60% brightness, and the live color controls open
 in your browser once streaming begins. Play audio on the Mac to animate the LEDs.
 If macOS requests audio recording access, allow Terminal in **System Settings →
 Privacy & Security → Screen & System Audio Recording → System Audio Recording

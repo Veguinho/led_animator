@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from lava_lamp_stream import LavaLampFluid
+from audio_palette_controls import PaletteControls, default_settings
 from led_animator import LedAnimation, save_preview_mp4
 from system_audio_visualizer import AudioVisualizer, FFT_SIZE, SAMPLE_RATE
 
@@ -22,8 +23,10 @@ DESTINATION = ROOT / "docs" / "assets"
 
 
 def spectrum_frames(samples: np.ndarray) -> list[np.ndarray]:
-    """Use the same trailing FFT window, rainbow, and defaults as the board."""
-    visualizer = AudioVisualizer("spectrum")
+    """Keep the documented full-speed rainbow preview reproducible."""
+    controls = PaletteControls(slowdown=0)
+    controls.update(default_settings() | {"preset": "rainbow", "brightness": 1, "slowdown": 0})
+    visualizer = AudioVisualizer("spectrum", controls=controls, slowdown=0)
     frames = []
     for index in range(FPS * SECONDS):
         # Frame zero corresponds to the beginning of the recorded soundtrack.

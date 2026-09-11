@@ -24,7 +24,7 @@ def main() -> int:
             webbrowser.open("http://127.0.0.1:8765")
             return 0
 
-        print("LED Audio Visualizer — live spectrum and rainbow palette")
+        print("LED Audio Visualizer — Adaptive, 20% slowdown, 60% brightness")
         print("Connect the LED board by USB and play audio on your Mac.")
         print("Press Control-C in this window to stop and turn off the LEDs.\n")
         # Keep the launcher and its lock alive while the worker refreshes

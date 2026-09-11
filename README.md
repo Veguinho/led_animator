@@ -28,12 +28,23 @@ The video converter also supports **48×48** grids.
       <br><a href="docs/assets/audio-spectrum.mp4">Watch with sound</a>
     </td>
   </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <a href="docs/assets/audio-adaptive.mp4">
+        <img src="docs/assets/audio-adaptive.gif" width="258" alt="16×16 Adaptive spectrum changing color and brightness with the energy of live Mac system audio">
+      </a>
+      <br><strong>Adaptive audio spectrum</strong>
+      <br>Warm, vivid colors for energetic passages; softer Ocean colors for quieter sections.
+      <br><a href="docs/assets/audio-adaptive.mp4">Watch with sound</a>
+    </td>
+  </tr>
 </table>
 
-The spectrum uses real Mac system audio recorded during playback and the same
-rainbow spectrum renderer as the board. Its MP4 includes the recorded sound;
-the inline GIF is silent. The lava is a seeded fluid simulation. Both are
-recorded previews. [Rebuild the previews](docs/development.md#readme-previews).
+The audio previews use real Mac system audio recorded during playback.
+Adaptive captures the running visualizer's live frames at 60% brightness and
+20% slowdown. Both audio MP4s include the recorded sound; the inline GIFs are
+silent. The lava is a seeded fluid simulation.
+[Record or rebuild the previews](docs/development.md#readme-previews).
 
 ## What you can run
 

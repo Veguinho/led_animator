@@ -9,7 +9,7 @@ from system_audio_visualizer import AudioVisualizer, FFT_SIZE
 
 class MovingRainbowTests(unittest.TestCase):
     def settings(self, **changes):
-        return default_settings() | {"preset": "moving-rainbow"} | changes
+        return default_settings() | {"preset": "moving-rainbow", "brightness": 1, "slowdown": 0} | changes
 
     def test_rainbow_moves_right_and_wraps_without_a_seam(self):
         initial = make_palette(self.settings())
@@ -66,7 +66,8 @@ class MovingRainbowTests(unittest.TestCase):
             controls.update(default_settings())
             visualizer.render(np.zeros(FFT_SIZE))
             self.assertEqual(reset.call_count, 2)
-            np.testing.assert_array_equal(visualizer.palette, make_palette())
+            self.assertTrue(visualizer._adaptive)
+            np.testing.assert_array_equal(visualizer.palette, np.full((16, 3), 255))
 
     def test_silent_audio_stays_dark_in_both_styles(self):
         for style in ("wave", "spectrum"):

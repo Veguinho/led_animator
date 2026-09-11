@@ -24,6 +24,8 @@ output/
 !docs/assets/lava-lamp.mp4
 !docs/assets/audio-spectrum.gif
 !docs/assets/audio-spectrum.mp4
+!docs/assets/audio-adaptive.gif
+!docs/assets/audio-adaptive.mp4
 
 # Local source videos can also be large; retain only the folder itself.
 video_clips/*

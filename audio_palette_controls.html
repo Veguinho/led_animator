@@ -21,6 +21,9 @@
       * {
         box-sizing: border-box;
       }
+      [hidden] {
+        display: none !important;
+      }
       body {
         margin: 0;
       }
@@ -348,12 +351,12 @@
           <fieldset id="controls" disabled>
             <div class="motion-control">
               <label for="slowdown" class="range-label">
-                Slowdown <output id="slowdown-value" for="slowdown">0%</output>
+                Slowdown <output id="slowdown-value" for="slowdown">20%</output>
               </label>
-              <input id="slowdown" type="range" min="0" max="95" step="1" value="0"
-                aria-describedby="slowdown-help" aria-valuetext="0% slowdown, full speed" />
+              <input id="slowdown" type="range" min="0" max="95" step="1" value="20"
+                aria-describedby="slowdown-help" aria-valuetext="20% slowdown, 80% speed" />
               <p id="slowdown-help">Slide right to slow the motion, left to speed it up.
-                Frames blend smoothly in between.</p>
+                Frames blend smoothly in between. Wave mode adds thicker sine and cosine curves.</p>
             </div>
             <div class="divider"></div>
             <h2>Color combinations</h2>
@@ -361,11 +364,16 @@
             <div id="presets" class="presets"></div>
             <p id="palette-motion" hidden>Colors flow across the panel. Slowdown controls
               their speed; Reverse direction changes their travel direction.</p>
+            <p id="palette-adaptive" hidden>Sections near the song’s recent maximum
+              energy and peak dB glow with warm, vivid colors. Quieter sections
+              drift toward a darker, softer Ocean palette of blue, cyan, and teal.
+              Colors and brightness ease with the music, and Slowdown
+              makes the transitions more gradual.</p>
             <div class="label">
-              <h2 id="palette-name">Rainbow</h2>
+              <h2 id="palette-name">Adaptive</h2>
               <button id="add" class="small" type="button">+ Add color</button>
             </div>
-            <p>Colors run from left to right across your panel.</p>
+            <p id="color-order">Colors run from left to right across your panel.</p>
             <div id="colors" class="colors"></div>
             <div class="row">
               <label for="blend">Combine colors</label
@@ -383,14 +391,14 @@
             <label for="brightness" class="range-label"
               >Brightness
               <output id="brightness-value" for="brightness"
-                >100%</output
+                >60%</output
               ></label
             ><input
               id="brightness"
               type="range"
               min="0"
               max="100"
-              value="100"
+              value="60"
             />
             <label for="saturation" class="range-label"
               >Saturation
@@ -435,7 +443,7 @@
             The preview stays dark when audio is silent. Brightness adjusts the
             palette; the music still controls each note’s glow.
           </p>
-          <p class="note">Every new session starts with rainbow.</p>
+          <p class="note">Every new session starts with Adaptive, 20% slowdown, and 60% brightness.</p>
         </aside>
       </div>
     </main>
@@ -445,6 +453,7 @@
       const names = {
         rainbow: "Rainbow",
         "moving-rainbow": "Moving rainbow",
+        adaptive: "Adaptive",
         "blue-red": "Blue → red",
         sunset: "Sunset",
         ocean: "Ocean",
@@ -495,8 +504,13 @@
       }
       function markSelection() {
         $("palette-name").textContent = names[settings.preset];
-        $("blend").disabled = settings.preset === "moving-rainbow";
+        const adaptive = settings.preset === "adaptive";
+        $("blend").disabled = adaptive || settings.preset === "moving-rainbow";
         $("palette-motion").hidden = settings.preset !== "moving-rainbow";
+        $("palette-adaptive").hidden = !adaptive;
+        $("colors").hidden = adaptive;
+        $("add").hidden = adaptive;
+        $("color-order").hidden = adaptive;
         document
           .querySelectorAll(".preset")
           .forEach((button) =>
@@ -631,7 +645,7 @@
           button.addEventListener("click", () => {
             settings.preset = key;
             settings.colors = [...colors];
-            if (key === "moving-rainbow") settings.blend = "gradient";
+            if (key === "moving-rainbow" || key === "adaptive") settings.blend = "gradient";
             renderSettings();
             queueUpdate();
           });
@@ -663,13 +677,13 @@
       }
       $("reset").addEventListener("click", () => {
         settings = {
-          preset: "rainbow",
-          colors: [...presets.rainbow],
+          preset: "adaptive",
+          colors: [...presets.adaptive],
           blend: "gradient",
-          brightness: 1,
+          brightness: 0.6,
           saturation: 1,
           reverse: false,
-          slowdown: 0,
+          slowdown: 20,
         };
         renderSettings();
         queueUpdate();

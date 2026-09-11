@@ -18,6 +18,7 @@ import numpy as np
 PRESETS = {
     "rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
     "moving-rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
+    "adaptive": ["#ff3300", "#ffbb00", "#93dfff", "#859cff"],
     "blue-red": ["#0d1eb8", "#b800ff", "#ff0000"],
     "sunset": ["#ffbe0b", "#ff5400", "#ff006e", "#8338ec"],
     "ocean": ["#052c80", "#0077ff", "#00e5ff", "#80ffdb"],
@@ -25,12 +26,14 @@ PRESETS = {
     "fire": ["#ff1800", "#ff8000", "#ffe066"],
 }
 
+DEFAULT_SLOWDOWN = 20.0
+
 
 def default_settings() -> dict:
     return {
-        "preset": "rainbow", "colors": PRESETS["rainbow"].copy(),
-        "blend": "gradient", "brightness": 1.0, "saturation": 1.0,
-        "reverse": False, "slowdown": 0.0,
+        "preset": "adaptive", "colors": PRESETS["adaptive"].copy(),
+        "blend": "gradient", "brightness": 0.6, "saturation": 1.0,
+        "reverse": False, "slowdown": DEFAULT_SLOWDOWN,
     }
 
 
@@ -57,7 +60,7 @@ def validate_settings(settings: object) -> dict:
     validate_slowdown(result["slowdown"])
     if result["preset"] != "custom":
         result["colors"] = PRESETS[result["preset"]].copy()
-        if result["preset"] == "moving-rainbow":
+        if result["preset"] in ("moving-rainbow", "adaptive"):
             result["blend"] = "gradient"
     else:
         result["colors"] = [color.lower() for color in colors]
@@ -71,6 +74,8 @@ def validate_slowdown(value: object) -> None:
 
 def make_palette(settings: dict | None = None, size: int = 16, phase: float = 0.0) -> np.ndarray:
     settings = validate_settings(default_settings() if settings is None else settings)
+    if settings["preset"] == "adaptive":
+        return make_adaptive_palette(settings, size=size)
     if settings["preset"] == "moving-rainbow":
         # A periodic hue wheel avoids a discontinuity between the panel edges.
         # Fractional phase shifts colors smoothly, instead of rolling columns.
@@ -102,10 +107,36 @@ def make_palette(settings: dict | None = None, size: int = 16, phase: float = 0.
     return palette[::-1].copy() if settings["reverse"] else palette
 
 
+def make_adaptive_palette(
+    settings: dict, energy: float = 0.0, colorful: float = 0.0, size: int = 16,
+) -> np.ndarray:
+    """Blend a dimmer, softer Ocean palette into vivid warm colors."""
+    positions = np.linspace(0, 1, size)
+    ocean = make_palette(settings | {
+        "preset": "ocean", "brightness": 1, "saturation": 1,
+        "reverse": False, "blend": "gradient",
+    }, size=size)
+    ocean_hsv = np.array([colorsys.rgb_to_hsv(*(color / 255.0)) for color in ocean])
+    cool = ocean_hsv[:, 0] - 1.0
+    warm = np.linspace(-0.04, 0.14, size)
+    # Most of the energetic palette is pink, red, orange, and gold, with
+    # violet/cyan accents for variety. Unwrapped hues cross red smoothly.
+    vivid = np.interp(positions, [0, .2, .4, .6, .8, 1], [-.12, 0, .14, .04, -.12, -.45])
+    hot = warm * (1.0 - colorful) + vivid * colorful
+    hues = cool * (1.0 - energy) + hot * energy
+    saturation = ocean_hsv[:, 1] * 0.6 * (1.0 - energy) + energy
+    value = (ocean_hsv[:, 2] * 0.28 * (1.0 - energy) + energy) * settings["brightness"]
+    palette = np.rint(np.array([
+        colorsys.hsv_to_rgb(float(hue % 1.0), sat * settings["saturation"], val)
+        for hue, sat, val in zip(hues, saturation, value)
+    ]) * 255).clip(0, 255).astype(np.uint8)
+    return palette[::-1].copy() if settings["reverse"] else palette
+
+
 class PaletteControls:
     """Publish whole palettes atomically; rendering owns its animation state."""
 
-    def __init__(self, slowdown: float = 0.0) -> None:
+    def __init__(self, slowdown: float = DEFAULT_SLOWDOWN) -> None:
         self._lock = threading.Lock()
         self._settings = validate_settings(default_settings() | {"slowdown": slowdown})
         self._palette = make_palette()

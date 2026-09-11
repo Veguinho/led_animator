@@ -28,6 +28,7 @@ python3 -m unittest discover -s tests -v
 | `Dockerfile` / `run_48_container.sh` | Resource-limited 48×48 video conversion |
 | `cs2_16x16_player_firmware/` | ESP32-S3 live receiver and physical panel mapping |
 | `scripts/render_readme_previews.py` | Reproducible documentation demos |
+| `scripts/record_adaptive_preview.py` | Record the running Adaptive preview and Mac system audio |
 | `tests/` | Audio, palette, lava, video conversion, export, and USB protocol tests |
 
 Only application code, launchers, firmware, documentation assets, and tests
@@ -51,15 +52,15 @@ Then rebuild the previews:
 python3 scripts/render_readme_previews.py --audio-file output/system-audio.wav
 ```
 
-This regenerates the four small files in `docs/assets/`: one 16-second,
+This regenerates the four lava and rainbow files in `docs/assets/`: one 16-second,
 30 FPS H.264 MP4 and one looping 12 FPS GIF for each mode. GIFs display inline
 in the README; each links to its MP4. The frames use the existing circular
 LED renderer at 258×258 pixels.
 
 Lava uses `LavaLampFluid` with seed 2026, the default 48×48 solver, and a
 15-second warmup. The spectrum preview feeds an actual audio recording,
-decoded to mono 48 kHz, into `AudioVisualizer("spectrum")` with the default
-rainbow palette and sensitivity. The trailing FFT windows follow the recorded
+decoded to mono 48 kHz, into `AudioVisualizer("spectrum")` with an explicit
+rainbow palette, full brightness, no slowdown, and default sensitivity. The trailing FFT windows follow the recorded
 audio timeline, and the MP4 includes that same soundtrack. The GIF is silent.
 The checked-in spectrum is a screen recording of that rendered spectrum,
 driven by Mac system audio captured during playback on September 10, 2026.
@@ -70,6 +71,24 @@ Provide at least 16 seconds of real recorded audio; synthetic tones are no
 longer used. Keep the original recording in ignored `output/`. To regenerate
 just the spectrum, add `--audio-only`. To regenerate just lava without an
 audio recording, use `--lava-only`.
+
+### Record Adaptive
+
+Start the live spectrum, select **Adaptive**, and play music on the Mac.
+With the virtual environment active, run in another terminal:
+
+```bash
+python3 scripts/record_adaptive_preview.py
+```
+
+The recorder samples the running visualizer's live preview for 16 seconds at
+30 FPS and records the system audio through a separate Core Audio tap.
+It renders those captured frames as circular LEDs in
+`docs/assets/audio-adaptive.mp4` with sound and a looping 12 FPS
+`docs/assets/audio-adaptive.gif`. The README recording uses 60% brightness
+and 20% slowdown. Keep the settings unchanged throughout recording.
+Use `--controls-port` if the live controls are on a port other than 8765.
+The source WAV, frames, palettes, and settings stay in ignored `output/`.
 
 These are software previews: the physical panel also quantizes frames to
 RGB565 and applies the firmware brightness and power limits.

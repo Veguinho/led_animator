@@ -11,12 +11,13 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import deque
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
 
-from audio_palette_controls import PaletteControls, PaletteServer, default_settings, make_palette, validate_slowdown
+from audio_palette_controls import DEFAULT_SLOWDOWN, PaletteControls, PaletteServer, default_settings, make_adaptive_palette, make_palette, validate_slowdown
 from export_arduino import encode_rgb565
 from stream_arduino import (
     DEFAULT_PORT_WAIT,
@@ -194,7 +195,7 @@ class AudioCapture:
 
 
 def color_palette() -> np.ndarray:
-    """Return the default full rainbow across the X axis."""
+    """Return the startup palette before audio envelopes begin moving."""
     return make_palette(size=GRID_SIZE)
 
 
@@ -232,7 +233,7 @@ class FrameDelayer:
 class AudioVisualizer:
     def __init__(
         self, style: str, sensitivity: float = DEFAULT_SENSITIVITY,
-        controls: PaletteControls | None = None, slowdown: float = 0.0,
+        controls: PaletteControls | None = None, slowdown: float = DEFAULT_SLOWDOWN,
     ) -> None:
         if style not in {"spectrum", "wave"}:
             raise ValueError("style must be 'spectrum' or 'wave'")
@@ -243,23 +244,34 @@ class AudioVisualizer:
         self._delayer = FrameDelayer()
         self.style = style
         self.sensitivity = sensitivity
-        self.palette = color_palette()
+        self.palette = np.full((GRID_SIZE, 3), 255, dtype=np.uint8)
         self.controls = controls
         self._palette_revision = -1
-        self._settings = default_settings()
+        self._settings = default_settings() | {"slowdown": slowdown}
         self._moving_rainbow = False
+        self._adaptive = True
+        self._energy = 0.0
+        self._colorful = 0.0
+        self._energy_history: deque[tuple[float, float, float]] = deque()
+        self._energy_clock = 0.0
+        self._song_levels: np.ndarray | None = None
         self._rainbow_phase = 0.0
         self._last_color_time: float | None = None
         self.levels = np.zeros(GRID_SIZE, dtype=np.float32)
         self.previous = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.float32)
         self.window = np.hanning(FFT_SIZE).astype(np.float32)
         frequencies = np.fft.rfftfreq(FFT_SIZE, 1.0 / SAMPLE_RATE)
+        self._energy_masks = [
+            (frequencies >= low) & (frequencies < high)
+            for low, high in ((45, 250), (250, 2500), (2500, 16000))
+        ]
         edges = np.geomspace(45.0, 12_000.0, GRID_SIZE + 1)
         self.band_masks = [
             (frequencies >= edges[index]) & (frequencies < edges[index + 1])
             for index in range(GRID_SIZE)
         ]
         self.volume_level = 0.0
+        self._wave_phase = 0.0
         self.band_brightness = np.zeros(GRID_SIZE, dtype=np.float32)
 
     def _update_volume_level(self, signal: np.ndarray) -> float:
@@ -287,14 +299,20 @@ class AudioVisualizer:
                 changed = any(settings[key] != self._settings[key] for key in settings if key != "slowdown")
                 if settings["preset"] != self._settings["preset"]:
                     self._rainbow_phase = 0.0
+                    self._energy = 0.0
+                    self._colorful = 0.0
+                    self._energy_history.clear()
+                    self._energy_clock = 0.0
+                    self._song_levels = None
                     elapsed = 0.0
                 self._settings = settings
                 if changed:
                     self._moving_rainbow = settings["preset"] == "moving-rainbow"
+                    self._adaptive = settings["preset"] == "adaptive"
                     # Animate a neutral brightness mask, then color it at the
                     # output cadence so even heavily slowed frames keep flowing.
                     self.palette = (np.full((GRID_SIZE, 3), 255, dtype=np.uint8)
-                                    if self._moving_rainbow else make_palette(settings))
+                                    if self._moving_rainbow or self._adaptive else make_palette(settings))
                     # Color edits apply immediately, even mid-transition.
                     self.previous.fill(0)
                     self._delayer.reset()
@@ -305,10 +323,67 @@ class AudioVisualizer:
                 self._rainbow_phase + elapsed * (1.0 - self.slowdown / 100.0) / RAINBOW_CYCLE_SECONDS
             ) % 1.0
             display_palette = make_palette(self._settings, phase=self._rainbow_phase)
+        elif self._adaptive:
+            display_palette = self._adaptive_palette(samples, elapsed)
+        if self._moving_rainbow or self._adaptive:
             frame = np.rint(frame.astype(np.float32) * display_palette[None, :, :] / 255.0).astype(np.uint8)
         if self.controls is not None:
             self.controls.publish_frame(frame, display_palette)
         return frame
+
+    def _adaptive_palette(self, samples: np.ndarray, elapsed: float) -> np.ndarray:
+        self._energy_clock += max(0.0, elapsed)
+        while self._energy_history and self._energy_history[0][0] < self._energy_clock - 30.0:
+            self._energy_history.popleft()
+        signal = np.zeros(FFT_SIZE, dtype=np.float64)
+        tail = samples[-FFT_SIZE:]
+        if len(tail):
+            signal[-len(tail):] = tail
+        signal -= signal.mean()
+        # Integrated band power measures the energy of each region, including
+        # energy spread across many notes. Normalize to RMS amplitude.
+        power = np.abs(np.fft.rfft(signal * self.window)) ** 2
+        energies = np.array([power[mask].sum() for mask in self._energy_masks])
+        energies *= 2.0 / (FFT_SIZE * np.square(self.window).sum())
+        amplitudes = np.sqrt(energies)
+        total = float(energies.sum())
+        levels = np.array([total, float(np.max(np.abs(signal))) ** 2]) * self.sensitivity**2
+        # Measure sustained passages before remembering their maxima. A single
+        # kick or click should not set the reference for the next half minute.
+        if self._song_levels is None:
+            self._song_levels = levels
+        else:
+            self._song_levels += (levels - self._song_levels) * (-np.expm1(-min(elapsed, 0.1) / 0.25))
+        energy = colorful = 0.0
+        if np.sqrt(total) * self.sensitivity >= 0.0005:
+            # Music rarely has equal power in all three regions. Count a band
+            # as present when it is within 24 dB of the strongest, fading that
+            # contribution out by 42 dB down. Fullness adds color variety;
+            # no single frequency region determines the palette temperature.
+            relative_db = 20.0 * np.log10(max(float(amplitudes.min() / amplitudes.max()), 1e-12))
+            presence = float(np.clip((relative_db + 42.0) / 18.0, 0, 1))
+            presence = presence * presence * (3.0 - 2.0 * presence)
+            rms_db, peak_db = 10.0 * np.log10(np.maximum(self._song_levels, 1e-12))
+            self._energy_history.append((self._energy_clock, rms_db, peak_db))
+            # Compare this passage with the song's recent maxima, not a fixed
+            # dBFS curve that leaves most mastered music permanently warm.
+            # RMS carries most of the weight: sparse hits reaching the same
+            # peak as a dense chorus must still be able to turn Ocean.
+            rms_max = max(-36.0, max(item[1] for item in self._energy_history))
+            peak_max = max(-30.0, max(item[2] for item in self._energy_history))
+            relative_db = 0.8 * (rms_db - rms_max) + 0.2 * (peak_db - peak_max)
+            amount = float(np.clip((relative_db + 6.0) / 4.0, 0, 1))
+            # A quiet room/noise floor cannot normalize itself into a chorus.
+            audible = float(np.clip((rms_db + 60.0) / 18.0, 0, 1))
+            energy = amount * amount * (3.0 - 2.0 * amount) * audible
+            colorful = energy * (0.8 + 0.2 * presence)
+        # Time-based envelopes prevent flashes on isolated beats and continue
+        # cooling during silence. Slowdown stretches the transitions too.
+        dt = min(elapsed, 0.1) / (1.0 + 3.0 * self.slowdown / 95.0)
+        tau = 0.8 if energy > self._energy else 1.4
+        self._energy += (energy - self._energy) * (-np.expm1(-dt / tau))
+        self._colorful += (colorful - self._colorful) * (-np.expm1(-dt / tau))
+        return make_adaptive_palette(self._settings, self._energy, self._colorful)
 
     def _render_frame(self, samples: np.ndarray) -> np.ndarray:
         if self.style == "spectrum":
@@ -360,19 +435,29 @@ class AudioVisualizer:
             padded_brightness, np.array([0.05, 0.90, 0.05]), mode="valid"
         )
 
-        frame = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
+        # A faint audio-gated backdrop uses every LED, including columns with
+        # little energy. Keep it high enough to survive RGB565 quantization.
+        glow = (
+            0.04 + 0.02 * self._volume_brightness()
+            if np.max(np.abs(signal)) >= 0.0005 else 0.0
+        )
+        background = np.rint(self.palette * glow).astype(np.uint8)
+        frame = np.broadcast_to(background, (GRID_SIZE, GRID_SIZE, 3)).copy()
         for column, level in enumerate(self.levels):
-            height = min(8, int(np.ceil(level * 8.0)))
+            height = min(8, int(np.ceil(level * 10.0)))
             band_intensity = (
                 0.0
-                if smooth_brightness[column] <= 0.0
+                if smooth_brightness[column] < 0.005
                 else 0.015 + 0.985 * smooth_brightness[column] ** 1.55
             )
             for offset in range(height):
                 distance = offset / (GRID_SIZE // 2 - 1)
-                axis_falloff = max(0.0, 1.0 - distance) ** 2.4
+                # Keep the center brightest without forcing the outer LEDs
+                # to black when a loud band reaches the full panel height.
+                axis_falloff = 0.18 + 0.82 * max(0.0, 1.0 - distance) ** 2.4
                 brightness = band_intensity * axis_falloff
                 color = np.rint(self.palette[column] * brightness).astype(np.uint8)
+                color = np.maximum(color, background[column])
                 frame[7 - offset, column] = color
                 frame[8 + offset, column] = color
         return frame
@@ -385,6 +470,9 @@ class AudioVisualizer:
             return np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
         self._update_volume_level(signal)
 
+        if self.slowdown > 0:
+            return self._render_slow_wave()
+
         # Trigger on a rising zero crossing to keep musical waveforms steadier.
         crossings = np.flatnonzero((signal[:-1] <= 0) & (signal[1:] > 0))
         start = int(crossings[-1]) if len(crossings) else len(signal) // 2
@@ -395,7 +483,7 @@ class AudioVisualizer:
         values = np.interp(positions, np.arange(len(visible)), visible)
         wave_size = self.volume_level**1.25
         values = np.clip(values / peak * wave_size, -1.0, 1.0)
-        rows = np.rint(7.5 - values * 7.0).astype(int)
+        rows = np.rint(7.5 - values * 7.5).astype(int)
 
         frame = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
         color_scale = self._volume_brightness()
@@ -410,6 +498,26 @@ class AudioVisualizer:
             for joined_row in range(low, high + 1):
                 frame[joined_row, column] = color
         return frame
+
+    def _render_slow_wave(self) -> np.ndarray:
+        # One broad cycle remains readable on 16 columns, even for noisy audio.
+        # FrameDelayer controls the pace; applying slowdown here too would
+        # multiply the slowdown and make the highest settings nearly freeze.
+        angles = np.linspace(0.0, 2.0 * np.pi, GRID_SIZE) - self._wave_phase
+        self._wave_phase = (self._wave_phase + 0.12) % (2.0 * np.pi)
+        amplitude = 7.0 * self.volume_level**1.25
+        centers = 7.5 - amplitude * np.array([np.sin(angles), np.cos(angles)])
+        half_width = 0.8 + 0.7 * self.slowdown / 95.0
+        rows = np.arange(GRID_SIZE)[:, None]
+        intensity = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        for center, strength in zip(centers, (1.0, 0.72)):
+            # A solid core and soft, subpixel edges keep thick curves smooth
+            # as their crests travel between LED rows.
+            stroke = np.clip(half_width + 0.5 - np.abs(rows - center), 0.0, 1.0)
+            intensity = np.maximum(intensity, stroke * strength)
+        return np.rint(
+            intensity[:, :, None] * self.palette[None, :, :] * self._volume_brightness()
+        ).clip(0, 255).astype(np.uint8)
 
 
 class RefreshRequested(Exception):
@@ -458,8 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="LED refresh rate (default: 30)",
     )
     parser.add_argument(
-        "--slowdown", type=float, default=0.0,
-        help="reduce animation updates by 0–95 percent and blend intervening frames",
+        "--slowdown", type=float, default=DEFAULT_SLOWDOWN,
+        help="reduce animation updates by 0–95 percent and blend intervening frames (default: 20)",
     )
     parser.add_argument(
         "--timeout", type=float, default=1.0, help="response timeout (default: 1)"

@@ -3,8 +3,12 @@ from unittest import mock
 
 import numpy as np
 
-from audio_palette_controls import PaletteControls, default_settings
+from audio_palette_controls import PaletteControls, default_settings as startup_settings
 from system_audio_visualizer import AudioVisualizer, FFT_SIZE, FrameDelayer, main
+
+
+def default_settings():
+    return startup_settings() | {"preset": "rainbow", "brightness": 1, "slowdown": 0}
 
 
 class FrameDelayerTests(unittest.TestCase):
@@ -41,6 +45,7 @@ class FrameDelayerTests(unittest.TestCase):
         for style in ("wave", "spectrum"):
             with self.subTest(style=style):
                 controls = PaletteControls(slowdown=75)
+                controls.update(default_settings() | {"slowdown": 75})
                 visualizer = AudioVisualizer(style, controls=controls)
                 source = mock.Mock(side_effect=[
                     np.zeros((16, 16, 3), dtype=np.uint8),
@@ -58,6 +63,7 @@ class FrameDelayerTests(unittest.TestCase):
 
     def test_speed_only_edit_does_not_reset_palette_or_transition(self):
         controls = PaletteControls(slowdown=50)
+        controls.update(default_settings() | {"slowdown": 50})
         visualizer = AudioVisualizer("wave", controls=controls)
         source = mock.Mock(side_effect=[
             np.zeros((16, 16, 3), dtype=np.uint8),

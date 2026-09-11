@@ -13,7 +13,7 @@ from audio_palette_controls import (
 class PaletteTests(unittest.TestCase):
     def test_combination_modes_and_reverse(self):
         settings = default_settings()
-        settings.update(preset="custom", colors=["#ff0000", "#0000ff"])
+        settings.update(preset="custom", colors=["#ff0000", "#0000ff"], brightness=1)
         gradient = make_palette(settings)
         self.assertTrue(np.all(gradient[1:-1, 0] > 0))
         self.assertTrue(np.all(gradient[1:-1, 2] > 0))
