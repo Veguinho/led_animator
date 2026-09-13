@@ -142,15 +142,17 @@ python main.py video video_clips/panel_test_32x32.mp4 --no-upload
 ```
 
 This 12-second, 30 FPS loop fades through full-screen red, green, blue and
-white, then highlights all four panels in reading order (IO10–IO13).
+white, then highlights all four panels in reading order (IO11, IO10, IO13, IO12).
 The default dimming and smoothing apply. Every pixel receives all three
 color channels; a panel remaining dark through the color washes is not
 explained by empty areas in this video. The expected panel positions are:
 
 ```text
-IO10  IO11
-IO12  IO13
+IO11  IO10
+IO13  IO12
 ```
+
+The images on IO11 and IO13 are mirrored horizontally, matching live audio.
 
 For a gentle full-screen color fade with no white phase or panel highlights:
 

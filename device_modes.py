@@ -15,6 +15,8 @@ VIDEO_FQBN = AUDIO_FQBN + ",PSRAM=opi"
 
 def stop_mode_workers() -> None:
     """Gracefully stop only audio/video workers belonging to this checkout."""
+    from audio_service import stop
+    stop()
     targets = {str(ROOT / "system_audio_visualizer.py"), str(ROOT / "preloaded_video/player.py")}
     rows = subprocess.check_output(["ps", "ax", "-o", "pid=,command="], text=True)
     for row in rows.splitlines():

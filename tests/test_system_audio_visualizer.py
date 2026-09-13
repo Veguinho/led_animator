@@ -12,6 +12,7 @@ from system_audio_visualizer import (
     GRID_SIZE,
     SAMPLE_RATE,
     AudioVisualizer,
+    AudioCapture,
     build_parser,
     color_palette,
     iter_audio_frames,
@@ -19,6 +20,18 @@ from system_audio_visualizer import (
 
 
 class AudioVisualizerTests(unittest.TestCase):
+    def test_audio_eof_triggers_recovery_instead_of_repeating_stale_samples(self):
+        for exit_code in (0, 1, None):
+            with self.subTest(exit_code=exit_code):
+                capture = AudioCapture()
+                capture._process = mock.Mock()
+                capture._process.poll.return_value = exit_code
+                capture._process.stderr.read.return_value = b""
+                with mock.patch("system_audio_visualizer.os.read", return_value=b""):
+                    capture._read_samples()
+                with self.assertRaisesRegex(RuntimeError, "audio capture stopped"):
+                    capture.latest(FFT_SIZE)
+
     def test_native_48_wave_has_individual_pixels_and_full_screen_reach(self):
         for slowdown in (0, 75):
             with self.subTest(slowdown=slowdown):

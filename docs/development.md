@@ -28,6 +28,7 @@ python3 -m unittest discover -s tests -v
 | `Dockerfile` / `run_48_container.sh` | Resource-limited 48×48 video conversion |
 | `cs2_16x16_player_firmware/` | ESP32-S3 live receiver and physical panel mapping |
 | `scripts/render_readme_previews.py` | Reproducible documentation demos |
+| `scripts/render_32x32_preview.py` | Reproducible native 32×32 spectrum image |
 | `scripts/record_adaptive_preview.py` | Record the running Adaptive preview and Mac system audio |
 | `tests/` | Audio, palette, lava, video conversion, export, and USB protocol tests |
 
@@ -37,6 +38,18 @@ are versioned. Keep source videos in `video_clips/` and generated media in
 and `.build/` holds the compiled capture helper and the app's runtime lock.
 
 ## README previews
+
+Regenerate the native 32×32 spectrum image without audio hardware or a board:
+
+```bash
+python3 scripts/render_32x32_preview.py
+```
+
+This writes `docs/assets/spectrum-32x32.png` from a deterministic multi-tone
+signal using the live Sunset spectrum renderer. It is the image shown in the
+[32×32 preview guide](32x32-preview.md).
+
+The animated previews use recorded audio and the original 16×16 presentation.
 
 Install the usual Python requirements and FFmpeg. Use a fresh audio recording,
 or extract the soundtrack from the existing preview:

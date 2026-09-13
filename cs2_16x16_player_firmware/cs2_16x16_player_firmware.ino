@@ -5,7 +5,8 @@
 #error "This sketch requires an ESP32-S3."
 #endif
 
-constexpr uint8_t BRIGHTNESS = 255;
+constexpr uint8_t BRIGHTNESS = 72;
+constexpr uint16_t MAX_PIXEL_RGB_TOTAL = 64;
 
 // Total estimated LED budget across ALL four panels. Keep the existing limit
 // until the external 5 V supply, fuses and power wiring have been sized.
@@ -93,6 +94,28 @@ CRGB decodeRgb565(uint16_t color) {
       (blue5 << 3) | (blue5 >> 2));
 }
 
+CRGB limitPixelBrightness(CRGB color) {
+  const uint16_t total = static_cast<uint16_t>(color.r) + color.g + color.b;
+  if (total > MAX_PIXEL_RGB_TOTAL) {
+    color.r = static_cast<uint16_t>(color.r) * MAX_PIXEL_RGB_TOTAL / total;
+    color.g = static_cast<uint16_t>(color.g) * MAX_PIXEL_RGB_TOTAL / total;
+    color.b = static_cast<uint16_t>(color.b) * MAX_PIXEL_RGB_TOTAL / total;
+  }
+  return color;
+}
+
+void showLimitedFrame() {
+  FastLED.wait();
+  for (uint16_t index = 0; index < NUM_LEDS; ++index) {
+    leds[index] = limitPixelBrightness(leds[index]);
+  }
+  // Reapply the ceilings at every transmission, including startup tests.
+  FastLED.setBrightness(BRIGHTNESS);
+  FastLED.setDither(0);
+  FastLED.show();
+  FastLED.wait();
+}
+
 void showMatrixCoverageTest() {
   FastLED.wait();
   for (uint8_t row = 0; row < HEIGHT; ++row) {
@@ -105,7 +128,7 @@ void showMatrixCoverageTest() {
   leds[physicalIndex(0, WIDTH - 1)] = CRGB::Green;
   leds[physicalIndex(HEIGHT - 1, 0)] = CRGB::Blue;
   leds[physicalIndex(HEIGHT - 1, WIDTH - 1)] = CRGB::White;
-  FastLED.show();
+  showLimitedFrame();
   delay(1500);
   FastLED.wait();
   FastLED.clear(true);
@@ -153,9 +176,8 @@ void drawFrame(const uint8_t *payload) {
     const uint8_t column = logicalIndex % WIDTH;
     leds[physicalIndex(row, column)] = decodeRgb565(color);
   }
-  FastLED.show();
-  // Finish the LED transfer before ACK lets the host send another frame.
-  FastLED.wait();
+  // Finish the limited LED transfer before ACK permits another frame.
+  showLimitedFrame();
 }
 
 void handlePacket(uint8_t type, uint16_t length, uint32_t sequence) {
@@ -255,6 +277,7 @@ void setup() {
   FastLED.addLeds<WS2812B, DATA_PINS[2], GRB>(leds + 2 * PANEL_LEDS, PANEL_LEDS);
   FastLED.addLeds<WS2812B, DATA_PINS[3], GRB>(leds + 3 * PANEL_LEDS, PANEL_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
+  FastLED.setDither(0);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, MAX_POWER_MILLIAMPS);
   FastLED.clear(true);
   FastLED.wait();

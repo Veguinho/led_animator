@@ -123,10 +123,22 @@ class RefreshLifecycleTests(unittest.TestCase):
             worker.__enter__.return_value = worker
             worker.wait.side_effect = wait
             with mock.patch.object(launch_audio_visualizer, "ROOT", root), \
+                 mock.patch.object(launch_audio_visualizer.audio_service, "installed", return_value=False), \
                  mock.patch.object(launch_audio_visualizer.subprocess, "Popen", return_value=worker):
                 self.assertEqual(launch_audio_visualizer.main(), 130)
             self.assertEqual(calls, 2)
             worker.terminate.assert_not_called()
+
+    def test_dock_uses_installed_service_without_starting_competing_worker(self):
+        with (
+            mock.patch.object(launch_audio_visualizer.audio_service, "installed", return_value=True),
+            mock.patch.object(launch_audio_visualizer.audio_service, "start") as start,
+            mock.patch.object(launch_audio_visualizer.webbrowser, "open"),
+            mock.patch.object(launch_audio_visualizer.subprocess, "Popen") as worker,
+        ):
+            self.assertEqual(launch_audio_visualizer.main(), 0)
+            start.assert_called_once_with()
+            worker.assert_not_called()
 
 
 if __name__ == "__main__":

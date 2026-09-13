@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import select
+import signal
 import subprocess
 import sys
 import threading
@@ -158,6 +159,8 @@ class AudioCapture:
             assert self._process.stderr is not None
             detail = self._process.stderr.read().decode(errors="replace").strip()
             self._error = detail.removeprefix("error: ") or "audio capture stopped"
+        else:
+            self._error = "audio capture stopped"
 
     def _append(self, samples: np.ndarray) -> None:
         with self._lock:
@@ -609,6 +612,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-browser", action="store_true", help="print the controls URL without opening a browser",
     )
+    parser.add_argument(
+        "--settings-file", type=Path,
+        help="save and restore palette settings across restarts",
+    )
     return parser
 
 
@@ -633,7 +640,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --controls-port must be between 0 and 65535")
 
     capture = AudioCapture()
-    controls = None if args.no_controls else PaletteControls(slowdown=args.slowdown, size=args.display_size)
+    controls = None if args.no_controls else PaletteControls(
+        slowdown=args.slowdown, size=args.display_size, settings_path=args.settings_file,
+    )
     control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
     refresh_requested = threading.Event()
@@ -718,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
     args.no_browser = True
     restart_args = []
     for name, value in vars(args).items():
+        if value is None:
+            continue
         flag = "--" + name.replace("_", "-")
         if isinstance(value, bool):
             if value:
@@ -733,4 +744,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    def stop_on_term(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_term)
     raise SystemExit(main())

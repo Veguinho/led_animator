@@ -1,4 +1,6 @@
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -11,6 +13,25 @@ from audio_palette_controls import (
 
 
 class PaletteTests(unittest.TestCase):
+    def test_palette_survives_restart_and_invalid_updates_do_not_overwrite_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "palette.json"
+            controls = PaletteControls(size=32, settings_path=path)
+            controls.update(default_settings() | {"preset": "sunset", "brightness": .296})
+            saved = controls.state()["settings"]
+            with self.assertRaises(ValueError):
+                controls.update(saved | {"brightness": 2})
+            restored = PaletteControls(size=32, settings_path=path)
+            self.assertEqual(restored.state()["settings"], saved)
+            np.testing.assert_array_equal(restored.palette_snapshot()[1], controls.palette_snapshot()[1])
+
+    def test_invalid_saved_palette_uses_safe_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "palette.json"
+            for content in ('{', '{"brightness": 1}'):
+                path.write_text(content)
+                self.assertEqual(PaletteControls(settings_path=path).state()["settings"], default_settings())
+
     def test_combination_modes_and_reverse(self):
         settings = default_settings()
         settings.update(preset="custom", colors=["#ff0000", "#0000ff"], brightness=1)
