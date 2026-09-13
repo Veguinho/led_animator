@@ -1,31 +1,25 @@
 #include <FastLED.h>
+#include "panel_layout.h"
 
-constexpr uint8_t DATA_PIN = 10;
-constexpr uint8_t WIDTH = 16;
-constexpr uint8_t HEIGHT = 16;
-constexpr uint16_t NUM_LEDS = WIDTH * HEIGHT;
-constexpr uint8_t BRIGHTNESS = 24;
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+#error "This sketch requires an ESP32-S3."
+#endif
 
-// A matriz e formada por uma unica cadeia em zigue-zague. Estas opcoes mudam
-// somente a orientacao da imagem; nenhuma delas reduz a area desenhada.
-constexpr bool SERPENTINE_LAYOUT = true;
-constexpr bool FLIP_HORIZONTAL = false;
-constexpr bool FLIP_VERTICAL = false;
+constexpr uint8_t BRIGHTNESS = 255;
 
-// Use uma fonte 5 V externa de pelo menos 2 A e una o GND da fonte ao GND do
-// ESP32. Nao alimente a matriz inteira pelo pino 5 V/USB.
-constexpr uint16_t MAX_POWER_MILLIAMPS = 2000;
-constexpr bool RUN_STARTUP_MATRIX_TEST = true;
+// Total estimated LED budget across ALL four panels. Keep the existing limit
+// until the external 5 V supply, fuses and power wiring have been sized.
+// This software estimate is not a substitute for hardware current protection.
+constexpr uint32_t MAX_POWER_MILLIAMPS = 2000;
+constexpr bool RUN_STARTUP_MATRIX_TEST = false;
 
-// CH340 adapters can corrupt data at 921600 baud on macOS. 230400 reliably
-// carries 16x16 RGB565 frames at the streamer's default 30 FPS.
-constexpr uint32_t SERIAL_BAUD = 230400;
+// The installed board's only USB socket uses a CH340 connected to UART0.
+// Match the live Python app; firmware flashing remains at 115200 baud.
+constexpr uint32_t SERIAL_BAUD = 2000000;
 constexpr uint16_t BYTES_PER_FRAME = NUM_LEDS * 2;
 constexpr uint16_t MAX_PACKET_PAYLOAD = BYTES_PER_FRAME;
 
-// The board's CH340 USB-to-serial chip is wired to UART0. On an ESP32-S3,
-// enabling "USB CDC On Boot" remaps the generic Serial object to native USB,
-// so always use Serial0 to keep this protocol on the CH340 cable.
+// Always address UART0 explicitly, even if a build enables native USB CDC.
 #define PANEL_SERIAL Serial0
 
 constexpr uint8_t PROTOCOL_VERSION = 1;
@@ -47,6 +41,7 @@ const uint8_t REQUEST_MAGIC[4] = {'L', 'E', 'D', 'S'};
 const uint8_t RESPONSE_MAGIC[4] = {'L', 'E', 'D', 'R'};
 
 CRGB leds[NUM_LEDS];
+// Only a complete, CRC-verified payload can replace the display buffer.
 uint8_t packetPayload[MAX_PACKET_PAYLOAD];
 bool streamReady = false;
 bool hasLastFrame = false;
@@ -88,19 +83,6 @@ uint32_t payloadCrc32(const uint8_t *bytes, uint16_t length) {
   return crc ^ 0xffffffffUL;
 }
 
-uint16_t physicalIndex(uint8_t row, uint8_t column) {
-  if (FLIP_VERTICAL) {
-    row = HEIGHT - 1 - row;
-  }
-  if (FLIP_HORIZONTAL) {
-    column = WIDTH - 1 - column;
-  }
-  if (SERPENTINE_LAYOUT && (row & 1U)) {
-    column = WIDTH - 1 - column;
-  }
-  return static_cast<uint16_t>(row) * WIDTH + column;
-}
-
 CRGB decodeRgb565(uint16_t color) {
   const uint8_t red5 = (color >> 11) & 0x1f;
   const uint8_t green6 = (color >> 5) & 0x3f;
@@ -112,6 +94,7 @@ CRGB decodeRgb565(uint16_t color) {
 }
 
 void showMatrixCoverageTest() {
+  FastLED.wait();
   for (uint8_t row = 0; row < HEIGHT; ++row) {
     for (uint8_t column = 0; column < WIDTH; ++column) {
       const CRGB color = (row & 1U) ? CRGB(0, 0, 24) : CRGB(0, 24, 0);
@@ -124,6 +107,7 @@ void showMatrixCoverageTest() {
   leds[physicalIndex(HEIGHT - 1, WIDTH - 1)] = CRGB::White;
   FastLED.show();
   delay(1500);
+  FastLED.wait();
   FastLED.clear(true);
 }
 
@@ -160,6 +144,8 @@ bool findRequestMagic() {
 }
 
 void drawFrame(const uint8_t *payload) {
+  // Never change LED data still owned by an in-flight transmission.
+  FastLED.wait();
   for (uint16_t logicalIndex = 0; logicalIndex < NUM_LEDS; ++logicalIndex) {
     const uint16_t offset = logicalIndex * 2;
     const uint16_t color = readU16(payload + offset);
@@ -168,6 +154,8 @@ void drawFrame(const uint8_t *payload) {
     leds[physicalIndex(row, column)] = decodeRgb565(color);
   }
   FastLED.show();
+  // Finish the LED transfer before ACK lets the host send another frame.
+  FastLED.wait();
 }
 
 void handlePacket(uint8_t type, uint16_t length, uint32_t sequence) {
@@ -208,7 +196,10 @@ void handlePacket(uint8_t type, uint16_t length, uint32_t sequence) {
       sendResponse(STATUS_NAK, ERROR_BAD_LENGTH, sequence);
       return;
     }
+    FastLED.wait();
     FastLED.clear(true);
+    FastLED.wait();  // CLEAR is complete when acknowledged.
+    hasLastFrame = false;
     sendResponse(STATUS_ACK, 0, sequence);
     return;
   }
@@ -252,13 +243,21 @@ void receivePacket() {
 }
 
 void setup() {
+  PANEL_SERIAL.setRxBufferSize(2 * (BYTES_PER_FRAME + 16));
   PANEL_SERIAL.begin(SERIAL_BAUD);
-  PANEL_SERIAL.setTimeout(100);
+  // Allow margin for USB packet gaps and incomplete frames.
+  PANEL_SERIAL.setTimeout(500);
 
-  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
+  // Use the same RMT-backed controllers as the working single-panel sketch.
+  static_assert(PANEL_COUNT == 4, "This firmware configures four RMT outputs.");
+  FastLED.addLeds<WS2812B, DATA_PINS[0], GRB>(leds, PANEL_LEDS);
+  FastLED.addLeds<WS2812B, DATA_PINS[1], GRB>(leds + PANEL_LEDS, PANEL_LEDS);
+  FastLED.addLeds<WS2812B, DATA_PINS[2], GRB>(leds + 2 * PANEL_LEDS, PANEL_LEDS);
+  FastLED.addLeds<WS2812B, DATA_PINS[3], GRB>(leds + 3 * PANEL_LEDS, PANEL_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, MAX_POWER_MILLIAMPS);
   FastLED.clear(true);
+  FastLED.wait();
 
   if (RUN_STARTUP_MATRIX_TEST) {
     showMatrixCoverageTest();
@@ -267,4 +266,7 @@ void setup() {
 
 void loop() {
   receivePacket();
+  if (PANEL_SERIAL.available() == 0) {
+    delay(1);  // Yield while waiting for the next frame.
+  }
 }

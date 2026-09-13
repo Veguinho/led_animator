@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Animate a 16x16 LED panel from the Mac's live system audio."""
+"""Render live Mac system audio at the LED screen's native resolution."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
+from brightness_envelope import BrightnessEnvelope
 
 from audio_palette_controls import DEFAULT_SLOWDOWN, PaletteControls, PaletteServer, default_settings, make_adaptive_palette, make_palette, validate_slowdown
 from export_arduino import encode_rgb565
@@ -26,6 +27,7 @@ from stream_arduino import (
     STATUS_ACK,
     FrameSource,
     SerialConnection,
+    add_display_argument,
     exchange_packet,
     handshake,
     open_serial,
@@ -39,6 +41,7 @@ CAPTURE_SOURCE = ROOT / "macos_system_audio.swift"
 CAPTURE_INFO = ROOT / "macos_system_audio.plist"
 CAPTURE_BINARY = ROOT / ".build" / "system_audio_capture"
 SAMPLE_RATE = 48_000
+# Offline previews retain their original size; live rendering uses --display-size.
 GRID_SIZE = 16
 FFT_SIZE = 2_048
 MIN_DBFS = -72.0
@@ -234,22 +237,28 @@ class AudioVisualizer:
     def __init__(
         self, style: str, sensitivity: float = DEFAULT_SENSITIVITY,
         controls: PaletteControls | None = None, slowdown: float = DEFAULT_SLOWDOWN,
+        *, size: int = GRID_SIZE,
     ) -> None:
         if style not in {"spectrum", "wave"}:
             raise ValueError("style must be 'spectrum' or 'wave'")
         if not np.isfinite(sensitivity) or sensitivity <= 0:
             raise ValueError("sensitivity must be positive")
+        if size not in (16, 32, 48):
+            raise ValueError("display size must be 16, 32 or 48")
+        self.size = size
         validate_slowdown(slowdown)
         self.slowdown = slowdown
         self._delayer = FrameDelayer()
         self.style = style
         self.sensitivity = sensitivity
-        self.palette = np.full((GRID_SIZE, 3), 255, dtype=np.uint8)
+        self.palette = np.full((self.size, 3), 255, dtype=np.uint8)
         self.controls = controls
         self._palette_revision = -1
         self._settings = default_settings() | {"slowdown": slowdown}
         self._moving_rainbow = False
-        self._adaptive = True
+        self._adaptive = self._settings["preset"] == "adaptive"
+        if not self._adaptive:
+            self.palette = make_palette(self._settings, size=self.size)
         self._energy = 0.0
         self._colorful = 0.0
         self._energy_history: deque[tuple[float, float, float]] = deque()
@@ -257,22 +266,29 @@ class AudioVisualizer:
         self._song_levels: np.ndarray | None = None
         self._rainbow_phase = 0.0
         self._last_color_time: float | None = None
-        self.levels = np.zeros(GRID_SIZE, dtype=np.float32)
-        self.previous = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.float32)
+        self._output_brightness: BrightnessEnvelope | None = None
+        self.levels = np.zeros(self.size, dtype=np.float32)
+        self.previous = np.zeros((self.size, self.size, 3), dtype=np.float32)
         self.window = np.hanning(FFT_SIZE).astype(np.float32)
         frequencies = np.fft.rfftfreq(FFT_SIZE, 1.0 / SAMPLE_RATE)
         self._energy_masks = [
             (frequencies >= low) & (frequencies < high)
             for low, high in ((45, 250), (250, 2500), (2500, 16000))
         ]
-        edges = np.geomspace(45.0, 12_000.0, GRID_SIZE + 1)
+        edges = np.geomspace(45.0, 12_000.0, self.size + 1)
         self.band_masks = [
             (frequencies >= edges[index]) & (frequencies < edges[index + 1])
-            for index in range(GRID_SIZE)
+            for index in range(self.size)
         ]
+        # At higher resolutions the narrow bass bands can be smaller than an FFT bin.
+        # Share the nearest bin in those bands instead of leaving dead columns.
+        for index, mask in enumerate(self.band_masks):
+            if not np.any(mask):
+                center = np.sqrt(edges[index] * edges[index + 1])
+                mask[np.argmin(np.abs(frequencies - center))] = True
         self.volume_level = 0.0
         self._wave_phase = 0.0
-        self.band_brightness = np.zeros(GRID_SIZE, dtype=np.float32)
+        self.band_brightness = np.zeros(self.size, dtype=np.float32)
 
     def _update_volume_level(self, signal: np.ndarray) -> float:
         rms = float(np.sqrt(np.mean(np.square(signal, dtype=np.float64))))
@@ -311,8 +327,8 @@ class AudioVisualizer:
                     self._adaptive = settings["preset"] == "adaptive"
                     # Animate a neutral brightness mask, then color it at the
                     # output cadence so even heavily slowed frames keep flowing.
-                    self.palette = (np.full((GRID_SIZE, 3), 255, dtype=np.uint8)
-                                    if self._moving_rainbow or self._adaptive else make_palette(settings))
+                    self.palette = (np.full((self.size, 3), 255, dtype=np.uint8)
+                                    if self._moving_rainbow or self._adaptive else make_palette(settings, size=self.size))
                     # Color edits apply immediately, even mid-transition.
                     self.previous.fill(0)
                     self._delayer.reset()
@@ -322,11 +338,13 @@ class AudioVisualizer:
             self._rainbow_phase = (
                 self._rainbow_phase + elapsed * (1.0 - self.slowdown / 100.0) / RAINBOW_CYCLE_SECONDS
             ) % 1.0
-            display_palette = make_palette(self._settings, phase=self._rainbow_phase)
+            display_palette = make_palette(self._settings, size=self.size, phase=self._rainbow_phase)
         elif self._adaptive:
             display_palette = self._adaptive_palette(samples, elapsed)
         if self._moving_rainbow or self._adaptive:
             frame = np.rint(frame.astype(np.float32) * display_palette[None, :, :] / 255.0).astype(np.uint8)
+        if self._output_brightness is not None:
+            frame = self._output_brightness.apply(frame, now)
         if self.controls is not None:
             self.controls.publish_frame(frame, display_palette)
         return frame
@@ -383,7 +401,7 @@ class AudioVisualizer:
         tau = 0.8 if energy > self._energy else 1.4
         self._energy += (energy - self._energy) * (-np.expm1(-dt / tau))
         self._colorful += (colorful - self._colorful) * (-np.expm1(-dt / tau))
-        return make_adaptive_palette(self._settings, self._energy, self._colorful)
+        return make_adaptive_palette(self._settings, self._energy, self._colorful, size=self.size)
 
     def _render_frame(self, samples: np.ndarray) -> np.ndarray:
         if self.style == "spectrum":
@@ -442,24 +460,24 @@ class AudioVisualizer:
             if np.max(np.abs(signal)) >= 0.0005 else 0.0
         )
         background = np.rint(self.palette * glow).astype(np.uint8)
-        frame = np.broadcast_to(background, (GRID_SIZE, GRID_SIZE, 3)).copy()
+        frame = np.broadcast_to(background, (self.size, self.size, 3)).copy()
         for column, level in enumerate(self.levels):
-            height = min(8, int(np.ceil(level * 10.0)))
+            height = min(self.size // 2, int(np.ceil(level * self.size / 2 * 1.25)))
             band_intensity = (
                 0.0
                 if smooth_brightness[column] < 0.005
                 else 0.015 + 0.985 * smooth_brightness[column] ** 1.55
             )
             for offset in range(height):
-                distance = offset / (GRID_SIZE // 2 - 1)
+                distance = offset / (self.size // 2 - 1)
                 # Keep the center brightest without forcing the outer LEDs
                 # to black when a loud band reaches the full panel height.
                 axis_falloff = 0.18 + 0.82 * max(0.0, 1.0 - distance) ** 2.4
                 brightness = band_intensity * axis_falloff
                 color = np.rint(self.palette[column] * brightness).astype(np.uint8)
                 color = np.maximum(color, background[column])
-                frame[7 - offset, column] = color
-                frame[8 + offset, column] = color
+                frame[self.size // 2 - 1 - offset, column] = color
+                frame[self.size // 2 + offset, column] = color
         return frame
 
     def _render_wave(self, samples: np.ndarray) -> np.ndarray:
@@ -467,7 +485,7 @@ class AudioVisualizer:
         peak = float(np.max(np.abs(signal)))
         if peak < 0.0005:
             self._update_volume_level(signal)
-            return np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
+            return np.zeros((self.size, self.size, 3), dtype=np.uint8)
         self._update_volume_level(signal)
 
         if self.slowdown > 0:
@@ -479,15 +497,16 @@ class AudioVisualizer:
         visible = signal[start : start + 720]
         if len(visible) < 32:
             visible = signal[-720:]
-        positions = np.linspace(0, len(visible) - 1, GRID_SIZE)
+        positions = np.linspace(0, len(visible) - 1, self.size)
         values = np.interp(positions, np.arange(len(visible)), visible)
         wave_size = self.volume_level**1.25
         values = np.clip(values / peak * wave_size, -1.0, 1.0)
-        rows = np.rint(7.5 - values * 7.5).astype(int)
+        center = (self.size - 1) / 2
+        rows = np.rint(center - values * center).astype(int)
 
-        frame = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
+        frame = np.zeros((self.size, self.size, 3), dtype=np.uint8)
         color_scale = self._volume_brightness()
-        for column in range(GRID_SIZE):
+        for column in range(self.size):
             row = rows[column]
             color = np.rint(self.palette[column] * color_scale).astype(np.uint8)
             frame[row, column] = color
@@ -500,16 +519,16 @@ class AudioVisualizer:
         return frame
 
     def _render_slow_wave(self) -> np.ndarray:
-        # One broad cycle remains readable on 16 columns, even for noisy audio.
+        # One broad cycle spans the screen, even for noisy audio.
         # FrameDelayer controls the pace; applying slowdown here too would
         # multiply the slowdown and make the highest settings nearly freeze.
-        angles = np.linspace(0.0, 2.0 * np.pi, GRID_SIZE) - self._wave_phase
+        angles = np.linspace(0.0, 2.0 * np.pi, self.size) - self._wave_phase
         self._wave_phase = (self._wave_phase + 0.12) % (2.0 * np.pi)
-        amplitude = 7.0 * self.volume_level**1.25
-        centers = 7.5 - amplitude * np.array([np.sin(angles), np.cos(angles)])
-        half_width = 0.8 + 0.7 * self.slowdown / 95.0
-        rows = np.arange(GRID_SIZE)[:, None]
-        intensity = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        amplitude = (self.size / 2 - 1) * self.volume_level**1.25
+        centers = (self.size - 1) / 2 - amplitude * np.array([np.sin(angles), np.cos(angles)])
+        half_width = (0.8 + 0.7 * self.slowdown / 95.0) * self.size / 16
+        rows = np.arange(self.size)[:, None]
+        intensity = np.zeros((self.size, self.size), dtype=np.float32)
         for center, strength in zip(centers, (1.0, 0.72)):
             # A solid core and soft, subpixel edges keep thick curves smooth
             # as their crests travel between LED rows.
@@ -528,6 +547,7 @@ def iter_audio_frames(
     capture: AudioCapture, visualizer: AudioVisualizer,
     refresh_requested: threading.Event | None = None,
 ) -> Iterator[bytes]:
+    visualizer._output_brightness = BrightnessEnvelope()
     while True:
         if refresh_requested is not None and refresh_requested.is_set():
             raise RefreshRequested()
@@ -536,8 +556,9 @@ def iter_audio_frames(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Animate a 16x16 ESP32 LED panel from Mac system audio"
+        description="Animate an ESP32 LED screen from Mac system audio"
     )
+    add_display_argument(parser)
     parser.add_argument(
         "--style",
         choices=("wave", "spectrum"),
@@ -563,14 +584,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="LED refresh rate (default: 30)",
+        help="LED refresh rate (default: 20 for 32x32 at 2,000,000 baud)",
     )
     parser.add_argument(
         "--slowdown", type=float, default=DEFAULT_SLOWDOWN,
         help="reduce animation updates by 0–95 percent and blend intervening frames (default: 20)",
     )
     parser.add_argument(
-        "--timeout", type=float, default=1.0, help="response timeout (default: 1)"
+        "--timeout", type=float, default=0.2, help="response timeout (default: 0.2)"
     )
     parser.add_argument(
         "--retries", type=int, default=3, help="packet retries (default: 3)"
@@ -612,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --controls-port must be between 0 and 65535")
 
     capture = AudioCapture()
-    controls = None if args.no_controls else PaletteControls(slowdown=args.slowdown)
+    controls = None if args.no_controls else PaletteControls(slowdown=args.slowdown, size=args.display_size)
     control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
     refresh_requested = threading.Event()
@@ -623,17 +644,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         capture.start()
-        visualizer = AudioVisualizer(args.style, args.sensitivity, controls, args.slowdown)
+        visualizer = AudioVisualizer(
+            args.style, args.sensitivity, controls, args.slowdown, size=args.display_size,
+        )
         source = FrameSource(
             fps=args.fps,
             iter_frames=lambda: iter_audio_frames(capture, visualizer, refresh_requested),
+            size=visualizer.size,
         )
         port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port}...", file=sys.stderr)
-        connection = open_serial(port, args.timeout)
+        connection = open_serial(port, args.timeout, baudrate=args.baud)
         time.sleep(0.2)
         connection.reset_input_buffer()
-        handshake(connection, source.fps, args.timeout, max(args.retries, 3))
+        handshake(connection, source.fps, args.timeout, max(args.retries, 3), args.display_size)
         print(
             f"Listening to Mac system audio; streaming {args.style} at "
             f"{source.fps:g} FPS. Ctrl-C stops.",
@@ -655,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             retries=args.retries,
             drop_late=True,
+            display_size=args.display_size,
         )
         return 0
     except RefreshRequested:

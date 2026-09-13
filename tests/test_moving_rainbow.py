@@ -55,7 +55,7 @@ class MovingRainbowTests(unittest.TestCase):
                 np.testing.assert_allclose(controls.state()["palette"], expected, atol=1)
                 np.testing.assert_array_equal(controls.state()["frame"], last)
 
-    def test_color_motion_does_not_reset_audio_trails_and_switching_back_clears_the_mask(self):
+    def test_color_motion_does_not_reset_audio_trails_and_switching_to_adaptive_clears_the_mask(self):
         controls = PaletteControls()
         controls.update(self.settings())
         visualizer = AudioVisualizer("spectrum", controls=controls)
@@ -63,7 +63,7 @@ class MovingRainbowTests(unittest.TestCase):
             for _ in range(5):
                 visualizer.render(np.zeros(FFT_SIZE))
             self.assertEqual(reset.call_count, 1)
-            controls.update(default_settings())
+            controls.update(default_settings() | {"preset": "adaptive"})
             visualizer.render(np.zeros(FFT_SIZE))
             self.assertEqual(reset.call_count, 2)
             self.assertTrue(visualizer._adaptive)

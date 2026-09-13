@@ -34,6 +34,104 @@ class FakeSerial:
 
 
 class StreamingProtocolTests(unittest.TestCase):
+    def test_48_pixel_handshake(self):
+        connection = mock.Mock()
+        with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
+            stream_arduino.handshake(connection, 60, 1, 3, display_size=48)
+        self.assertEqual(
+            stream_arduino.HELLO.unpack(exchange.call_args.args[3]),
+            (48, 48, 1, 0, 16667),
+        )
+
+    def test_existing_effect_pixels_expand_to_three_by_three_blocks(self):
+        pixels = np.arange(256, dtype="<u2").reshape(16, 16)
+        payload = stream_arduino.resize_rgb565(pixels.tobytes(), 16, 48)
+        result = np.frombuffer(payload, dtype="<u2").reshape(48, 48)
+        self.assertEqual(len(payload), 4608)
+        for row in range(16):
+            for column in range(16):
+                self.assertTrue(np.all(result[row*3:row*3+3, column*3:column*3+3] == pixels[row, column]))
+
+    def test_native_48_pixel_frame_keeps_every_pixel(self):
+        payload = np.arange(48*48, dtype="<u2").tobytes()
+        self.assertEqual(stream_arduino.resize_rgb565(payload, 48, 48), payload)
+        with self.assertRaisesRegex(ValueError, "expected 4608"):
+            stream_arduino.resize_rgb565(payload[:-2], 48, 48)
+
+    def test_video_decodes_at_native_screen_resolution(self):
+        frame = np.zeros((48, 48, 3), dtype=np.uint8)
+        frame[47, 47] = (255, 0, 0)
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(stream_arduino, "probe_video", return_value=VideoInfo(1920, 1080, 60)),
+            mock.patch.object(stream_arduino, "iter_square_video_frames", return_value=iter([frame])) as decode,
+        ):
+            source = open_video(Path("sample.mp4"), target_fps=60, size=48)
+            payload = next(source.iter_frames())
+        self.assertEqual(source.size, 48)
+        self.assertEqual(decode.call_args.args[2], 48)
+        self.assertEqual(len(payload), 4608)
+        self.assertEqual(struct.unpack_from("<H", payload, 4606)[0], 0xf800)
+
+    def test_stream_transmits_full_screen_payload(self):
+        source = stream_arduino.FrameSource(60, lambda: iter([bytes(512)]))
+        with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=False, display_size=48,
+            )
+        self.assertEqual(result, (1, 0))
+        self.assertEqual(len(exchange.call_args.args[3]), 4608)
+
+    def test_32_pixel_handshake(self):
+        connection = mock.Mock()
+        with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
+            stream_arduino.handshake(connection, 60, 1, 3, display_size=32)
+        self.assertEqual(
+            stream_arduino.HELLO.unpack(exchange.call_args.args[3]),
+            (32, 32, 1, 0, 16667),
+        )
+
+    def test_existing_effect_pixels_expand_to_two_by_two_blocks(self):
+        pixels = np.arange(256, dtype="<u2").reshape(16, 16)
+        payload = stream_arduino.resize_rgb565(pixels.tobytes(), 16, 32)
+        result = np.frombuffer(payload, dtype="<u2").reshape(32, 32)
+        self.assertEqual(len(payload), 2048)
+        for row in range(16):
+            for column in range(16):
+                self.assertTrue(np.all(result[row*2:row*2+2, column*2:column*2+2] == pixels[row, column]))
+
+    def test_native_32_pixel_frame_keeps_every_pixel(self):
+        payload = np.arange(32*32, dtype="<u2").tobytes()
+        self.assertEqual(stream_arduino.resize_rgb565(payload, 32, 32), payload)
+        with self.assertRaisesRegex(ValueError, "expected 2048"):
+            stream_arduino.resize_rgb565(payload[:-2], 32, 32)
+
+    def test_video_decodes_at_native_32_screen_resolution(self):
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        frame[31, 31] = (255, 0, 0)
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(stream_arduino, "probe_video", return_value=VideoInfo(1920, 1080, 60)),
+            mock.patch.object(stream_arduino, "iter_square_video_frames", return_value=iter([frame])) as decode,
+        ):
+            source = open_video(Path("sample.mp4"), target_fps=60, size=32)
+            payload = next(source.iter_frames())
+        self.assertEqual(source.size, 32)
+        self.assertEqual(decode.call_args.args[2], 32)
+        self.assertEqual(len(payload), 2048)
+        self.assertEqual(struct.unpack_from("<H", payload, 2046)[0], 0xf800)
+
+    def test_stream_transmits_32_screen_payload(self):
+        source = stream_arduino.FrameSource(60, lambda: iter([bytes(512)]))
+        with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=False, display_size=32,
+            )
+        self.assertEqual(result, (1, 0))
+        self.assertEqual(len(exchange.call_args.args[3]), 2048)
+
     def test_frame_packet_contains_length_sequence_and_crc(self):
         payload = bytes(range(256)) * 2
         packet = build_packet(PACKET_FRAME, 42, payload)

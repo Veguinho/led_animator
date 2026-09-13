@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert video frames to 16x16 RGB565 and stream them over USB serial."""
+"""Convert video frames to RGB565 and stream them over USB."""
 
 from __future__ import annotations
 
@@ -28,8 +28,10 @@ from led_animator import (
 WIDTH = 16
 HEIGHT = 16
 FRAME_BYTES = WIDTH * HEIGHT * 2
-SERIAL_BAUD = 230_400
-DEFAULT_STREAM_FPS = 30.0
+DEFAULT_DISPLAY_SIZE = 32
+SERIAL_BAUD = 2_000_000
+# Leave room for decoding and parallel LED submission as well as UART traffic.
+DEFAULT_STREAM_FPS = 20.0
 DEFAULT_PORT_WAIT = 30.0
 
 # Common USB serial names on macOS, Linux, and boards using WCH or Silicon Labs
@@ -75,6 +77,7 @@ class SerialConnection(Protocol):
 class FrameSource:
     fps: float
     iter_frames: Callable[[], Iterator[bytes]]
+    size: int = 16
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,7 @@ def exchange_packet(
                 return
         except (TimeoutError, RuntimeError) as exc:
             last_error = exc
+            print(f"Serial retry for packet {sequence}: {exc}", file=sys.stderr, flush=True)
     assert last_error is not None
     raise RuntimeError(
         f"packet {sequence} failed after {retries + 1} attempts: {last_error}"
@@ -173,15 +177,16 @@ def iter_compiled_video(
     source_fps: float,
     output_fps: float,
     led_gamma: float = LED_INTENSITY_GAMMA,
+    size: int = 16,
 ) -> Iterator[bytes]:
     """Decode, sample, resize, and RGB565-encode without saving the video."""
     info = probe_video(path)
     next_output_time = 0.0
-    for index, frame in enumerate(iter_square_video_frames(path, info, WIDTH)):
+    for index, frame in enumerate(iter_square_video_frames(path, info, size)):
         frame_time = index / source_fps
         if frame_time + 1e-12 < next_output_time:
             continue
-        grid = frame if frame.shape == (HEIGHT, WIDTH, 3) else frame_to_led_grid(frame)
+        grid = frame if frame.shape == (size, size, 3) else frame_to_led_grid(frame, size)
         yield encode_rgb565(map_led_intensity(grid, led_gamma))
         next_output_time += 1.0 / output_fps
 
@@ -190,6 +195,7 @@ def open_video(
     path: Path,
     target_fps: float | None = None,
     led_gamma: float = LED_INTENSITY_GAMMA,
+    size: int = 16,
 ) -> FrameSource:
     if not path.is_file():
         raise ValueError(f"video does not exist: {path}")
@@ -203,7 +209,8 @@ def open_video(
         raise ValueError("LED gamma must be a positive finite number")
     return FrameSource(
         fps=fps,
-        iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma),
+        iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma, size),
+        size=size,
     )
 
 
@@ -262,7 +269,7 @@ def resolve_port(
         time.sleep(poll_interval)
 
 
-def open_serial(port: str, timeout: float) -> SerialConnection:
+def open_serial(port: str, timeout: float, baudrate: int = SERIAL_BAUD) -> SerialConnection:
     try:
         import serial
     except ImportError as exc:
@@ -273,7 +280,7 @@ def open_serial(port: str, timeout: float) -> SerialConnection:
     # which can hold some ESP32-S3 auto-reset circuits in reset indefinitely.
     connection = serial.Serial()
     connection.port = port
-    connection.baudrate = SERIAL_BAUD
+    connection.baudrate = baudrate
     connection.timeout = min(0.1, timeout)
     connection.write_timeout = timeout
     connection.dtr = False
@@ -283,10 +290,11 @@ def open_serial(port: str, timeout: float) -> SerialConnection:
 
 
 def handshake(
-    connection: SerialConnection, fps: float, timeout: float, retries: int
+    connection: SerialConnection, fps: float, timeout: float, retries: int,
+    display_size: int = 16,
 ) -> None:
     frame_duration_us = round(1_000_000 / fps)
-    payload = HELLO.pack(WIDTH, HEIGHT, 1, 0, frame_duration_us)
+    payload = HELLO.pack(display_size, display_size, 1, 0, frame_duration_us)
     exchange_packet(
         connection,
         PACKET_HELLO,
@@ -298,6 +306,28 @@ def handshake(
     )
 
 
+def resize_rgb565(payload: bytes, source_size: int, display_size: int) -> bytes:
+    """Scale existing effects to the tiled display without changing RGB565 colors."""
+    expected = source_size * source_size * 2
+    if len(payload) != expected:
+        raise ValueError(f"compiled frame has {len(payload)} bytes; expected {expected}")
+    if source_size == display_size:
+        return payload
+    pixels = np.frombuffer(payload, dtype="<u2").reshape(source_size, source_size)
+    indices = np.arange(display_size) * source_size // display_size
+    return pixels[indices[:, None], indices[None, :]].astype("<u2").tobytes()
+
+
+def add_display_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--baud", type=int, default=SERIAL_BAUD,
+                        choices=(230400, 460800, 921600, 1000000, 1500000, 2000000),
+                        help="serial baud rate; must match firmware (default: %(default)s)")
+    parser.add_argument(
+        "--display-size", type=int, choices=(16, 32, 48), default=DEFAULT_DISPLAY_SIZE,
+        help="physical screen width/height (default: %(default)s; must match the installed firmware)",
+    )
+
+
 def stream_frames(
     connection: SerialConnection,
     source: FrameSource,
@@ -306,20 +336,20 @@ def stream_frames(
     timeout: float,
     retries: int,
     drop_late: bool,
+    display_size: int = 16,
 ) -> tuple[int, int]:
     timeline_index = 0
     sent = 0
     dropped = 0
     period = 1.0 / source.fps
+    stats_start = time.monotonic()
+    stats_sent = 0
 
     while True:
         frames_this_pass = 0
         pass_start: float | None = None
         for payload in source.iter_frames():
-            if len(payload) != FRAME_BYTES:
-                raise ValueError(
-                    f"compiled frame has {len(payload)} bytes; expected {FRAME_BYTES}"
-                )
+            payload = resize_rgb565(payload, source.size, display_size)
             frames_this_pass += 1
             if pass_start is None:
                 # Start the clock after FFmpeg produces its first frame, so
@@ -344,6 +374,16 @@ def stream_frames(
                 retries,
             )
             sent += 1
+            if sent == 1:
+                print(
+                    f"Controller acknowledged the first {display_size}×{display_size} frame.",
+                    file=sys.stderr,
+                )
+            stats_now = time.monotonic()
+            if stats_now - stats_start >= 5:
+                print(f"Live playback: {(sent - stats_sent)/(stats_now - stats_start):.1f} FPS; "
+                      f"{dropped} late frames skipped total", file=sys.stderr, flush=True)
+                stats_start, stats_sent = stats_now, sent
             timeline_index += 1
         if frames_this_pass == 0:
             raise RuntimeError("video produced no frames")
@@ -353,8 +393,9 @@ def stream_frames(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert an MP4 and stream it to a 16x16 ESP32 LED panel"
+        description="Convert an MP4 and stream it to an ESP32 LED screen"
     )
+    add_display_argument(parser)
     parser.add_argument("video", nargs="?", type=Path, help="input MP4 video")
     parser.add_argument(
         "--port", default="auto", help="serial port (default: auto-detect)"
@@ -369,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="maximum streaming FPS (default: 30)",
+        help="maximum streaming FPS (default: 20 for 32x32 at 2,000,000 baud)",
     )
     parser.add_argument(
         "--led-gamma",
@@ -384,8 +425,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=1.0,
-        help="response timeout (default: 1 second)",
+        default=0.2,
+        help="response timeout (default: 0.2 seconds)",
     )
     parser.add_argument(
         "--retries", type=int, default=3, help="packet retries (default: 3)"
@@ -421,15 +462,15 @@ def main(argv: list[str] | None = None) -> int:
 
     connection: SerialConnection | None = None
     try:
-        source = open_video(args.video, args.fps, args.led_gamma)
+        source = open_video(args.video, args.fps, args.led_gamma, args.display_size)
         port = resolve_port(args.port, wait_timeout=args.port_wait)
-        print(f"Opening {port} at {SERIAL_BAUD} baud...", file=sys.stderr)
-        connection = open_serial(port, args.timeout)
+        print(f"Opening {port} for {args.display_size}×{args.display_size} frames...", file=sys.stderr)
+        connection = open_serial(port, args.timeout, baudrate=args.baud)
         # Opening USB serial often resets an ESP32. Retries cover boot and the
         # optional 1.5-second matrix coverage test in the sketch.
         time.sleep(0.2)
         connection.reset_input_buffer()
-        handshake(connection, source.fps, args.timeout, max(args.retries, 3))
+        handshake(connection, source.fps, args.timeout, max(args.retries, 3), args.display_size)
         print(
             f"Converting and streaming at {source.fps:.3f} FPS. Ctrl-C stops.",
             file=sys.stderr,
@@ -441,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             retries=args.retries,
             drop_late=not args.no_drop,
+            display_size=args.display_size,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
         return 0

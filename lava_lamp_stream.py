@@ -16,10 +16,10 @@ from stream_arduino import (
     DEFAULT_PORT_WAIT,
     DEFAULT_STREAM_FPS,
     PACKET_CLEAR,
-    SERIAL_BAUD,
     STATUS_ACK,
     FrameSource,
     SerialConnection,
+    add_display_argument,
     exchange_packet,
     handshake,
     open_serial,
@@ -50,7 +50,7 @@ class LavaLampFluid:
         self,
         size: int = DEFAULT_SIMULATION_SIZE,
         *,
-        fps: float = DEFAULT_STREAM_FPS,
+        fps: float = 30.0,
         seed: int = DEFAULT_SEED,
         speed: float = 1.0,
         brightness: float = 1.0,
@@ -69,7 +69,10 @@ class LavaLampFluid:
 
         self.size = size
         self.fps = fps
-        self.dt = min(speed / fps, 1.0 / 20.0)
+        # Keep physics steps small even when the UART sends only four frames
+        # per second. Render cadence must not shorten warmup or slow the fluid.
+        self.steps_per_frame = max(1, math.ceil(speed / fps * 20.0))
+        self.dt = speed / fps / self.steps_per_frame
         self.brightness = brightness
         self.rng = np.random.default_rng(seed)
         self.elapsed = 0.0
@@ -88,7 +91,7 @@ class LavaLampFluid:
         self.emitter_rate = self.rng.uniform(0.48, 0.78, 3)
         self.emitter_drift = self.rng.uniform(0.12, 0.28, 3)
 
-        warmup_frames = round(warmup_seconds * fps)
+        warmup_frames = round(warmup_seconds * fps) * self.steps_per_frame
         for _ in range(warmup_frames):
             self.step()
 
@@ -220,7 +223,8 @@ class LavaLampFluid:
 
     def render(self) -> np.ndarray:
         """Advance and return one 16x16 RGB frame in the warm lava palette."""
-        self.step()
+        for _ in range(self.steps_per_frame):
+            self.step()
         density = self._panel_field(self.density)
         heat = self._panel_field(self.temperature)
 
@@ -240,8 +244,9 @@ def iter_lava_frames(simulation: LavaLampFluid) -> Iterator[bytes]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Simulate fluid lava and stream it to a 16x16 ESP32 LED panel"
+        description="Simulate fluid lava and stream it to an ESP32 LED screen"
     )
+    add_display_argument(parser)
     parser.add_argument(
         "--port", default="auto", help="serial port (default: auto-detect)"
     )
@@ -255,7 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="LED refresh rate (default: 30)",
+        help="LED refresh rate (default: 20 for 32x32 at 2,000,000 baud)",
     )
     parser.add_argument(
         "--simulation-size",
@@ -280,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="simulated seconds prepared before display starts (default: 2.5)",
     )
     parser.add_argument(
-        "--timeout", type=float, default=1.0, help="response timeout (default: 1)"
+        "--timeout", type=float, default=0.2, help="response timeout (default: 0.2)"
     )
     parser.add_argument(
         "--retries", type=int, default=3, help="packet retries (default: 3)"
@@ -325,11 +330,11 @@ def main(argv: list[str] | None = None) -> int:
             fps=args.fps, iter_frames=lambda: iter_lava_frames(simulation)
         )
         port = resolve_port(args.port, wait_timeout=args.port_wait)
-        print(f"Opening {port} at {SERIAL_BAUD} baud...", file=sys.stderr)
-        connection = open_serial(port, args.timeout)
+        print(f"Opening {port} for {args.display_size}×{args.display_size} frames...", file=sys.stderr)
+        connection = open_serial(port, args.timeout, baudrate=args.baud)
         time.sleep(0.2)
         connection.reset_input_buffer()
-        handshake(connection, source.fps, args.timeout, max(args.retries, 3))
+        handshake(connection, source.fps, args.timeout, max(args.retries, 3), args.display_size)
         print(
             f"Streaming lava-lamp fluid at {source.fps:g} FPS. Ctrl-C stops.",
             file=sys.stderr,
@@ -341,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             retries=args.retries,
             drop_late=True,
+            display_size=args.display_size,
         )
         return 0
     except KeyboardInterrupt:

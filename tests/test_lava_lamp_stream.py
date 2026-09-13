@@ -11,10 +11,18 @@ from lava_lamp_stream import (
 
 
 class LavaLampFluidTests(unittest.TestCase):
+    def test_low_stream_rate_preserves_simulation_time(self):
+        simulation = LavaLampFluid(size=32, fps=4, warmup_seconds=1.0, seed=7)
+        self.assertAlmostEqual(simulation.elapsed, 1.0)
+        frame = simulation.render()
+        self.assertAlmostEqual(simulation.elapsed, 1.25)
+        self.assertLessEqual(simulation.dt, 0.05)
+        self.assertTrue(np.any(frame[..., 0]))
+
     def test_defaults_match_the_16x16_stream(self):
         args = build_parser().parse_args([])
 
-        self.assertEqual(args.fps, 30.0)
+        self.assertEqual(args.fps, 20.0)
         self.assertEqual(args.simulation_size, DEFAULT_SIMULATION_SIZE)
         self.assertEqual(args.simulation_size % 16, 0)
 

@@ -1,5 +1,6 @@
 import colorsys
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -13,10 +14,107 @@ from system_audio_visualizer import (
     AudioVisualizer,
     build_parser,
     color_palette,
+    iter_audio_frames,
 )
 
 
 class AudioVisualizerTests(unittest.TestCase):
+    def test_native_48_wave_has_individual_pixels_and_full_screen_reach(self):
+        for slowdown in (0, 75):
+            with self.subTest(slowdown=slowdown):
+                visualizer = self.visualizer("wave", size=48, slowdown=slowdown)
+                for _ in range(80):
+                    frame = visualizer.render(self.tone(0.7, 440))
+                self.assertEqual(frame.shape, (48, 48, 3))
+                self.assertEqual(frame.dtype, np.uint8)
+                self.assertTrue(np.all(np.any(frame, axis=(0, 2))))
+                lit_rows = np.flatnonzero(np.any(frame, axis=(1, 2)))
+                self.assertLess(lit_rows[0], 3)
+                self.assertGreater(lit_rows[-1], 44)
+                enlarged = np.repeat(np.repeat(frame[::3, ::3], 3, axis=0), 3, axis=1)
+                self.assertFalse(np.array_equal(frame, enlarged))
+                capture = mock.Mock()
+                capture.latest.return_value = self.tone(0.7, 440)
+                self.assertEqual(len(next(iter_audio_frames(capture, visualizer))), 4608)
+
+    def test_native_48_palettes_and_preview_keep_their_resolution_after_edits(self):
+        controls = PaletteControls(size=48, slowdown=0)
+        self.assertEqual(np.array(controls.state()["frame"]).shape, (48, 48, 3))
+        for style in ("wave", "spectrum"):
+            visualizer = AudioVisualizer(style, controls=controls, size=48)
+            for preset in ("rainbow", "moving-rainbow", "adaptive", "ocean", "custom"):
+                with self.subTest(style=style, preset=preset):
+                    controls.update(default_settings() | {"preset": preset, "slowdown": 0})
+                    self.assertEqual(np.array(controls.state()["palette"]).shape, (48, 3))
+                    frame = visualizer.render(self.tone(0.7))
+                    self.assertEqual(frame.shape, (48, 48, 3))
+                    state = controls.state()
+                    self.assertEqual(np.array(state["palette"]).shape, (48, 3))
+                    np.testing.assert_array_equal(state["frame"], frame)
+
+    def test_native_48_spectrum_has_no_empty_bands_and_reaches_both_edges(self):
+        visualizer = self.visualizer("spectrum", size=48)
+        self.assertEqual(len(visualizer.band_masks), 48)
+        self.assertTrue(all(np.any(mask) for mask in visualizer.band_masks))
+        for _ in range(30):
+            frame = visualizer.render(self.tone(0.1, SAMPLE_RATE / FFT_SIZE * 5))
+        self.assertTrue(np.all(frame[[0, -1]].max(axis=(1, 2)) > 20))
+
+    def test_native_48_wave_fades_to_black(self):
+        visualizer = self.visualizer("wave", size=48, slowdown=75)
+        visualizer.render(self.tone(0.7))
+        for _ in range(120):
+            frame = visualizer.render(np.zeros(FFT_SIZE, dtype=np.float32))
+        self.assertFalse(np.any(frame))
+
+    def test_native_32_wave_has_individual_pixels_and_full_screen_reach(self):
+        for slowdown in (0, 75):
+            with self.subTest(slowdown=slowdown):
+                visualizer = self.visualizer("wave", size=32, slowdown=slowdown)
+                for _ in range(80):
+                    frame = visualizer.render(self.tone(0.7, 440))
+                self.assertEqual(frame.shape, (32, 32, 3))
+                self.assertEqual(frame.dtype, np.uint8)
+                self.assertTrue(np.all(np.any(frame, axis=(0, 2))))
+                lit_rows = np.flatnonzero(np.any(frame, axis=(1, 2)))
+                self.assertLess(lit_rows[0], 3)
+                self.assertGreater(lit_rows[-1], 28)
+                enlarged = np.repeat(np.repeat(frame[::2, ::2], 2, axis=0), 2, axis=1)
+                self.assertFalse(np.array_equal(frame, enlarged))
+                capture = mock.Mock()
+                capture.latest.return_value = self.tone(0.7, 440)
+                self.assertEqual(len(next(iter_audio_frames(capture, visualizer))), 2048)
+
+    def test_native_32_palettes_and_preview_keep_their_resolution_after_edits(self):
+        controls = PaletteControls(size=32, slowdown=0)
+        self.assertEqual(np.array(controls.state()["frame"]).shape, (32, 32, 3))
+        for style in ("wave", "spectrum"):
+            visualizer = AudioVisualizer(style, controls=controls, size=32)
+            for preset in ("rainbow", "moving-rainbow", "adaptive", "ocean", "custom"):
+                with self.subTest(style=style, preset=preset):
+                    controls.update(default_settings() | {"preset": preset, "slowdown": 0})
+                    self.assertEqual(np.array(controls.state()["palette"]).shape, (32, 3))
+                    frame = visualizer.render(self.tone(0.7))
+                    self.assertEqual(frame.shape, (32, 32, 3))
+                    state = controls.state()
+                    self.assertEqual(np.array(state["palette"]).shape, (32, 3))
+                    np.testing.assert_array_equal(state["frame"], frame)
+
+    def test_native_32_spectrum_has_no_empty_bands_and_reaches_both_edges(self):
+        visualizer = self.visualizer("spectrum", size=32)
+        self.assertEqual(len(visualizer.band_masks), 32)
+        self.assertTrue(all(np.any(mask) for mask in visualizer.band_masks))
+        for _ in range(30):
+            frame = visualizer.render(self.tone(0.1, SAMPLE_RATE / FFT_SIZE * 5))
+        self.assertTrue(np.all(frame[[0, -1]].max(axis=(1, 2)) > 20))
+
+    def test_native_32_wave_fades_to_black(self):
+        visualizer = self.visualizer("wave", size=32, slowdown=75)
+        visualizer.render(self.tone(0.7))
+        for _ in range(120):
+            frame = visualizer.render(np.zeros(FFT_SIZE, dtype=np.float32))
+        self.assertFalse(np.any(frame))
+
     @staticmethod
     def visualizer(style, **kwargs):
         # Keep renderer geometry tests independent of the selected startup look.
@@ -60,14 +158,14 @@ class AudioVisualizerTests(unittest.TestCase):
     def test_startup_defaults_and_explicit_rainbow_palette(self):
         settings = default_settings()
         self.assertEqual((settings["preset"], settings["brightness"], settings["slowdown"]),
-                         ("adaptive", .6, 20))
+                         ("custom", 16 / 255, 20))
         self.assertEqual(build_parser().parse_args([]).slowdown, 20)
         for controls in (None, PaletteControls()):
             visualizer = AudioVisualizer("wave", controls=controls)
             visualizer.render(np.zeros(FFT_SIZE))
-            self.assertTrue(visualizer._adaptive)
+            self.assertFalse(visualizer._adaptive)
             self.assertEqual(visualizer.slowdown, 20)
-            self.assertEqual(visualizer._settings["brightness"], .6)
+            self.assertEqual(visualizer._settings["brightness"], 16 / 255)
         np.testing.assert_array_equal(color_palette(), make_palette(settings))
         palette = make_palette(settings | {"preset": "rainbow", "brightness": 1})
         self.assertEqual(palette.shape, (GRID_SIZE, 3))
@@ -80,6 +178,17 @@ class AudioVisualizerTests(unittest.TestCase):
         ])
         np.testing.assert_allclose(hues, np.linspace(0, 5 / 6, GRID_SIZE), atol=0.002)
         self.assertFalse(build_parser().parse_args([]).no_controls)
+
+    def test_default_live_styles_stay_within_the_dim_red_test_level(self):
+        for style in ("wave", "spectrum"):
+            for controls in (None, PaletteControls(size=32)):
+                with self.subTest(style=style, controls=controls is not None):
+                    visualizer = AudioVisualizer(style, controls=controls, size=32)
+                    for _ in range(80):
+                        frame = visualizer.render(self.tone(0.9, 440))
+                        self.assertLessEqual(int(frame.max()), 16)
+                        self.assertFalse(np.any(frame[:, :, 1:]))
+                    self.assertGreater(int(frame.max()), 0)
 
     def test_live_palette_recolors_both_styles_and_clears_old_trails(self):
         for style, slowdown in (("wave", 0), ("spectrum", 0), ("wave", 75), ("spectrum", 75)):

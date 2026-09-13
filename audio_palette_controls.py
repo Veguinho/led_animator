@@ -31,8 +31,8 @@ DEFAULT_SLOWDOWN = 20.0
 
 def default_settings() -> dict:
     return {
-        "preset": "adaptive", "colors": PRESETS["adaptive"].copy(),
-        "blend": "gradient", "brightness": 0.6, "saturation": 1.0,
+        "preset": "custom", "colors": ["#ff0000"],
+        "blend": "gradient", "brightness": 16 / 255, "saturation": 1.0,
         "reverse": False, "slowdown": DEFAULT_SLOWDOWN,
     }
 
@@ -136,17 +136,18 @@ def make_adaptive_palette(
 class PaletteControls:
     """Publish whole palettes atomically; rendering owns its animation state."""
 
-    def __init__(self, slowdown: float = DEFAULT_SLOWDOWN) -> None:
+    def __init__(self, slowdown: float = DEFAULT_SLOWDOWN, *, size: int = 16) -> None:
+        self.size = size
         self._lock = threading.Lock()
         self._settings = validate_settings(default_settings() | {"slowdown": slowdown})
-        self._palette = make_palette()
+        self._palette = make_palette(size=self.size)
         self._display_palette = self._palette.copy()
         self._revision = 0
-        self._frame = np.zeros((16, 16, 3), dtype=np.uint8)
+        self._frame = np.zeros((self.size, self.size, 3), dtype=np.uint8)
 
     def update(self, settings: object) -> None:
         validated = validate_settings(settings)
-        palette = make_palette(validated)
+        palette = make_palette(validated, size=self.size)
         with self._lock:
             self._settings = validated
             self._palette = palette

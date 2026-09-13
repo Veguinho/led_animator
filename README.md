@@ -1,11 +1,39 @@
 # 💡 LED Animator
 
-Live lava, audio-reactive waves, and video playback on a **16×16 RGB LED
-panel**. Python creates the frames; an ESP32-S3 drives the LEDs over USB.
-The video converter also supports **48×48** grids.
+Live lava, audio-reactive waves, and video playback on a **32×32 RGB LED
+screen** built from four 16×16 panels. Python creates the frames; an ESP32-S3
+drives IO10–IO13 independently and receives frames through the existing CH340 USB
+connection. Full 32×32 streaming defaults to 20 FPS on this hardware.
+Live audio uses four RMT outputs and waits for each frame to finish before
+acknowledging it; preloaded video retains its separate LCD_CAM driver.
+Viewed from the front, the panel layout is:
+
+```text
+IO10  IO11
+IO12  IO13
+```
+
+Live audio starts in dim red at the tested 16/255 level (about 6.3%), with
+manual brightness control, softened frame changes and the normal firmware brightness ceiling of 255/255.
+The previews below show the original 16×16 effects. Audio and video now render
+at native 32×32 resolution; lava still scales its 16×16 artwork to fill the screen.
 
 [Quick start](#quick-start) · [Hardware](docs/hardware.md) ·
 [Live streaming](docs/live-streaming.md) · [Video conversion](docs/video-conversion.md)
+
+Choose live audio or locally buffered video with `python main.py`.
+[Preloaded video mode](preloaded_video/README.md) uploads a short clip into
+the board's PSRAM, then plays at 30 FPS by default without streaming each frame
+over USB. Video defaults to 25% pixel intensity and 180 ms of temporal smoothing.
+Its buffer holds up to about 102 seconds at 30 FPS. Switching modes
+installs the corresponding firmware.
+Video loading now uses a tested **2,000,000-baud** connection (about 129 KB/s
+of measured payload throughput); firmware flashing remains at 115200 baud.
+
+```bash
+python main.py audio
+python main.py video video_clips/clip.mp4 --seconds 10
+```
 
 ## See it in motion
 
@@ -70,9 +98,9 @@ python3 -m pip install -r requirements.txt
 ```
 
 For physical playback, follow the [wiring and firmware setup](docs/hardware.md)
-for an ESP32-S3 and a 16×16 WS2812B matrix with a separate 5 V supply and
-common ground. After installing the firmware prerequisites, upload and
-start the audio wave:
+for an ESP32-S3 and four 16×16 WS2812B panels with external 5 V power and
+common ground. Connect the controller's existing USB port. After installing
+the firmware prerequisites, upload and start the audio wave:
 
 ```bash
 ./start.sh --style wave

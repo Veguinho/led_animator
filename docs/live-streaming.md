@@ -5,6 +5,15 @@
 Run commands from the repository root with the virtual environment active.
 Upload the streaming firmware once and run only one streamer at a time.
 Ctrl+C stops a stream; `--clear-on-exit` also turns off the LEDs.
+The current firmware uses four panels on IO10–IO13 and the existing CH340 USB port.
+All streamers default to `--display-size 32`; use `--display-size 16` only
+with the old single-panel firmware and `--baud 230400`. The launcher and Python commands
+default to 20 FPS to fit full 32×32 frames through the 2,000,000-baud connection.
+Upload the updated live firmware once before using these faster defaults.
+The terminal reports measured FPS and skipped frames every five seconds.
+Acknowledgement timeouts default to 0.2 seconds so an occasional lost reply
+does not pause playback for a full second; retries retain CRC validation and
+duplicate-frame protection. Use `--timeout 1` if a slower host needs more time.
 
 ## Stream a video
 
@@ -14,15 +23,15 @@ ESP32 by USB, and run:
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 stream_arduino.py video_clips/my_video.mp4 --loop
+python3 stream_arduino.py video_clips/my_video.mp4 --fps 20 --loop
 ```
 
 The Mac decodes the MP4 with FFmpeg, center-crops it, converts every selected
-frame to a 16×16 RGB565 image, applies an LED intensity curve, and sends the
-512-byte frames at 230400 baud. Pure black switches the LED off; colors near
+frame to a 32×32 RGB565 image, applies an LED intensity curve, and sends the
+2048-byte frames over CH340/UART at 2,000,000 baud. Pure black switches the LED off; colors near
 black keep their hue but use progressively less PWM power instead of being
 shown as equally bright colors.
-Playback defaults to 30 FPS for reliable CH340 USB-serial operation.
+Direct video playback defaults to 20 FPS, or the source frame rate if lower.
 Nothing is written to a generated `.h` file. With the default `--port auto`,
 the streamer ignores Bluetooth devices and waits up to 30 seconds for a USB
 serial board, so it can be started before disconnecting and reconnecting the
@@ -33,7 +42,7 @@ select the board explicitly:
 ```bash
 python3 stream_arduino.py --list-ports
 python3 stream_arduino.py video_clips/my_video.mp4 \
-  --port /dev/cu.usbserial-1410 --fps 30 --loop
+  --port /dev/cu.usbserial-1420 --fps 20 --loop
 ```
 
 The default `--led-gamma 2.2` gives dark pixels a strong intensity falloff.
@@ -61,11 +70,22 @@ Slow the motion or reduce software brightness without changing the firmware:
 python3 lava_lamp_stream.py --speed 0.75 --brightness 0.8 --clear-on-exit
 ```
 
-The default 48×48 simulation grid is averaged down to the physical 16×16
-matrix. Use `--seed` for a repeatable flow pattern, `--fps` for the refresh
+The default 48×48 simulation grid is averaged down to the existing 16×16
+artwork, then scaled to the physical 32×32 screen in 2×2 pixel blocks. Use `--seed` for a repeatable flow pattern, `--fps` for the refresh
 rate, or `--port` when more than one USB controller is connected.
 
 ## System audio: wave and spectrum
+
+Both audio styles render directly at the selected screen resolution, which
+defaults to **32×32**. Waves sample all 32 columns, spectrum bars use 32 bands,
+and colors, trails, and slowed curves are drawn at full resolution. To stream
+the wave to the four-panel firmware using the existing USB connection:
+
+```bash
+python3 system_audio_visualizer.py --style wave --display-size 32 --fps 20 --clear-on-exit
+```
+
+Use `--display-size 16` with the old single-panel firmware and `--baud 230400`.
 
 The panel can also react to music, a DJ set, a browser, or anything else being
 played by the Mac. This captures the digital system output directly; it does
@@ -84,7 +104,7 @@ or the microphone, and does not need screen recording permission. It compiles
 automatically on its first run and requires macOS 14.2 or newer plus Apple's
 Command Line Tools. Audio is converted to mono 48 kHz for the visualizer.
 
-The default is an Adaptive wave with 20% slowdown and 60% brightness. For mirrored frequency bars, use:
+The default is a dim red wave with 20% slowdown and 6.3% manual brightness. For mirrored frequency bars, use:
 
 ```bash
 python3 system_audio_visualizer.py --style spectrum
@@ -95,7 +115,7 @@ Once streaming starts, a **Live palette** panel opens in your browser at
 edit up to six colors with color pickers or hex codes; combine them as a smooth
 gradient or solid bands; reverse their order; and adjust brightness and
 saturation. All changes apply to the next audio frame in either style, with a
-live 16×16 preview. **Reset defaults** restores Adaptive, 20% slowdown, and 60% brightness. Settings are not saved between runs.
+live preview matching the selected display size. **Reset defaults** restores dim red, 20% slowdown, and 6.3% manual brightness. Settings are not saved between runs.
 
 Choose **Moving rainbow** for a continuous rainbow that travels smoothly
 from left to right across the X axis. It works with both wave and spectrum.
@@ -137,14 +157,12 @@ the original live audio waveform.
 Strong audio can reach the top and bottom LED rows in both wave and spectrum
 modes. Spectrum bars have 25% more vertical reach and stay brightest at the
 center, with visible edges when a band reaches full height. A faint background
-uses all 256 LEDs while audio plays and fades out in silence. The brightness
-slider controls light intensity; audio levels control the drawing height.
+uses the entire rendered image while audio plays and fades out in silence. The brightness
+is controlled by the slider; audio levels still shape the animation.
 
-At the default 30 FPS, 50% slowdown creates 15 new animation frames per second
-and blends between them to keep sending 30 frames. At a configured 60 FPS,
-the same setting would create 30 new frames and send 60. The current USB setup
-still defaults to 30 FPS for reliable streaming; the slider does not change the
-serial speed or firmware. A higher slowdown makes reactions more gradual,
+At the default 20 FPS, 50% slowdown creates ten new animation frames per second
+and blends between them to keep sending twenty frames. The slider does not change
+the serial bandwidth or firmware. A higher slowdown makes reactions more gradual,
 but keeps sampling current audio instead of building an audio backlog.
 
 Set an initial slowdown from the command line, including without the browser:
@@ -175,7 +193,7 @@ while quiet passages stay smaller and dimmer.
 
 The default audio sensitivity multiplier is `--sensitivity 1.5`. Raise it further
 for especially quiet sources, or select a controller explicitly
-with `--port /dev/cu.usbserial-1410` when multiple boards are connected.
+with `--port /dev/cu.usbserial-1420` when multiple boards are connected.
 
 To compile and upload the ESP32 sketch and immediately start the live spectrum,
 complete the [firmware prerequisites](hardware.md#firmware-installation), then run:
@@ -184,7 +202,7 @@ complete the [firmware prerequisites](hardware.md#firmware-installation), then r
 ./start.sh
 ```
 
-The launcher auto-detects the USB port and uses the ESP32-S3 board profile. Use
+The launcher auto-detects the USB port and uses the ESP32-S3 board profile with UART0 and a 115200-baud upload rate. Use
 `./start.sh --no-upload` to restart only the Python stream, or pass another
 board profile with `--fqbn` when needed. All remaining options, such as
 `--sensitivity 2`, are forwarded to the visualizer.
@@ -199,7 +217,7 @@ Install the launcher in your personal Applications folder and pin it to the Dock
 
 Connect the board by USB, then click **LED Audio Visualizer** in the Dock (or
 double-click `~/Applications/LED Audio Visualizer.app`). A Terminal window starts
-the spectrum with Adaptive, 20% slowdown, and 60% brightness, and the live color controls open
+the spectrum with dim red, 20% slowdown, and 6.3% manual brightness, and the live color controls open
 in your browser once streaming begins. Play audio on the Mac to animate the LEDs.
 If macOS requests audio recording access, allow Terminal in **System Settings →
 Privacy & Security → Screen & System Audio Recording → System Audio Recording
@@ -238,3 +256,13 @@ To launch the same app workflow from Terminal:
 
 A rendered sample of each live mode appears in the README. The audio sample
 uses generated tones; actual motion follows whatever is playing on your Mac.
+
+### Manual brightness and smoothing
+
+The brightness slider sets the software level from 0% to 100% (about 6.3% by default, matching the dim red test at 16/255).
+There is no automatic brightness cycle or peak normalization. The final
+output stage only smooths frame changes over 0.5 seconds; it does not boost
+dim frames. Audio-reactive effects still follow the music and fade in silence.
+The firmware brightness ceiling is 255/255. These percentages
+are software levels, not a measurement of physical light output. This limit
+cannot prevent flashes caused by corrupted LED signals or faulty wiring.

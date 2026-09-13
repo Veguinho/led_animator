@@ -367,10 +367,10 @@
             <p id="palette-adaptive" hidden>Sections near the song’s recent maximum
               energy and peak dB glow with warm, vivid colors. Quieter sections
               drift toward a darker, softer Ocean palette of blue, cyan, and teal.
-              Colors and brightness ease with the music, and Slowdown
+              Colors follow the music, the brightness slider sets the intensity, and Slowdown
               makes the transitions more gradual.</p>
             <div class="label">
-              <h2 id="palette-name">Adaptive</h2>
+              <h2 id="palette-name">Custom</h2>
               <button id="add" class="small" type="button">+ Add color</button>
             </div>
             <p id="color-order">Colors run from left to right across your panel.</p>
@@ -391,14 +391,15 @@
             <label for="brightness" class="range-label"
               >Brightness
               <output id="brightness-value" for="brightness"
-                >60%</output
+                >6.3%</output
               ></label
             ><input
               id="brightness"
               type="range"
               min="0"
               max="100"
-              value="60"
+              step="0.1"
+              value="6.3"
             />
             <label for="saturation" class="range-label"
               >Saturation
@@ -423,7 +424,7 @@
         <aside class="card preview-card">
           <div class="label">
             <h2>Panel preview</h2>
-            <span class="eyebrow">16 × 16</span>
+            <span class="eyebrow" id="preview-size">32 × 32</span>
           </div>
           <p>The live frame sent to your LEDs.</p>
           <canvas
@@ -431,7 +432,7 @@
             width="384"
             height="384"
             role="img"
-            aria-label="Live 16 by 16 audio visualization"
+            aria-label="Live audio visualization"
           ></canvas>
           <div
             id="strip"
@@ -443,7 +444,7 @@
             The preview stays dark when audio is silent. Brightness adjusts the
             palette; the music still controls each note’s glow.
           </p>
-          <p class="note">Every new session starts with Adaptive, 20% slowdown, and 60% brightness.</p>
+          <p class="note">Set brightness with the slider. Frame transitions remain smooth.</p>
         </aside>
       </div>
     </main>
@@ -492,12 +493,22 @@
             return cell;
           }),
         );
-        context.clearRect(0, 0, 384, 384);
+        const canvas = $("preview");
+        const rows = data.frame.length;
+        const columns = data.frame[0].length;
+        const cellWidth = canvas.width / columns;
+        const cellHeight = canvas.height / rows;
+        $("preview-size").textContent = `${columns} × ${rows}`;
+        canvas.setAttribute("aria-label", `Live ${columns} by ${rows} audio visualization`);
+        context.clearRect(0, 0, canvas.width, canvas.height);
         data.frame.forEach((row, y) =>
           row.forEach((rgb, x) => {
             context.fillStyle = `rgb(${rgb.map((v) => Math.max(12, v)).join(",")})`;
             context.beginPath();
-            context.arc(x * 24 + 12, y * 24 + 12, 7.5, 0, Math.PI * 2);
+            context.arc(
+              (x + 0.5) * cellWidth, (y + 0.5) * cellHeight,
+              Math.min(cellWidth, cellHeight) * 0.3125, 0, Math.PI * 2,
+            );
             context.fill();
           }),
         );
@@ -579,7 +590,9 @@
         $("blend").value = settings.blend;
         $("reverse").checked = settings.reverse;
         for (const key of ["brightness", "saturation"]) {
-          $(key).value = Math.round(settings[key] * 100);
+          $(key).value = key === "brightness"
+            ? Math.round(settings[key] * 1000) / 10
+            : Math.round(settings[key] * 100);
           $(key + "-value").value = $(key).value + "%";
         }
         renderSlowdown();
@@ -677,10 +690,10 @@
       }
       $("reset").addEventListener("click", () => {
         settings = {
-          preset: "adaptive",
-          colors: [...presets.adaptive],
+          preset: "custom",
+          colors: ["#ff0000"],
           blend: "gradient",
-          brightness: 0.6,
+          brightness: 16 / 255,
           saturation: 1,
           reverse: false,
           slowdown: 20,
