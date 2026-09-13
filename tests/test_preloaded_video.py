@@ -184,12 +184,14 @@ class PreloadedVideoTests(unittest.TestCase):
                      f"102 python {root}/preloaded_video/player.py clip.mp4\n")
         with (
             mock.patch.object(device_modes.subprocess, "check_output", return_value=processes),
+            mock.patch("audio_service.stop") as stop_service,
             mock.patch.object(device_modes.os, "getpid", return_value=102),
             mock.patch.object(device_modes.os, "kill", side_effect=[None, ProcessLookupError]) as kill,
             mock.patch.object(device_modes.time, "sleep"),
             mock.patch("sys.stdout", new_callable=io.StringIO),
         ):
             device_modes.stop_mode_workers()
+            stop_service.assert_called_once_with()
         self.assertEqual([call.args[0] for call in kill.call_args_list], [100, 100])
 
     @unittest.skipUnless(shutil.which("c++"), "C++ compiler required")

@@ -9,9 +9,17 @@ import webbrowser
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import audio_service
 
 
 def main() -> int:
+    if audio_service.installed():
+        audio_service.start()
+        webbrowser.open("http://127.0.0.1:8765")
+        print("The visualizer runs in the background and restarts automatically.")
+        print("Stop it with: .venv/bin/python audio_service.py stop")
+        return 0
     # The OS releases this lock even if the process crashes. Repeated Dock
     # clicks must not start competing streams on the same serial connection.
     (ROOT / ".build").mkdir(exist_ok=True)

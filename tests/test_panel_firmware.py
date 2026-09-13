@@ -29,11 +29,12 @@ struct FakeLED {
   struct Lane { int pin; CRGB *data; int length; std::vector<CRGB> snapshot; };
   std::vector<Lane> lanes;
   bool inFlight = false;
-  int shows = 0;
+  int shows = 0, brightness = 255, dither = 1;
   template<int CHIPSET, int PIN, int ORDER> void addLeds(CRGB *data, int count) {
     lanes.push_back({PIN, data, count, {}});
   }
-  void setBrightness(int) {}
+  void setBrightness(int value) { brightness = value; }
+  void setDither(int value) { dither = value; }
   void setMaxPowerInVoltsAndMilliamps(int, uint32_t) {}
   void wait() {
     if (inFlight) {
@@ -44,6 +45,11 @@ struct FakeLED {
   }
   void show() {
     assert(!inFlight);
+    assert(brightness == 72 && dither == 0);
+    for (auto &lane : lanes) for (int i=0; i<lane.length; ++i) {
+      const auto &color = lane.data[i];
+      assert(int(color.r) + color.g + color.b <= 64);
+    }
     for (auto &lane : lanes)
       lane.snapshot.assign(lane.data, lane.data + lane.length);
     inFlight = true;
@@ -116,17 +122,28 @@ int main() {
     seen[index] = true;
   }
   assert(WIDTH == 32 && HEIGHT == 32 && NUM_LEDS == 1024);
-  assert(physicalIndex(0,0) == 0 && physicalIndex(0,16) == 256);
-  assert(physicalIndex(16,0) == 512 && physicalIndex(16,16) == 768);
-  assert(physicalIndex(1,0) == 31 && physicalIndex(1,16) == 287);
+  assert(physicalIndex(0,0) == 15 && physicalIndex(0,16) == 256);
+  assert(physicalIndex(16,0) == 527 && physicalIndex(16,16) == 768);
+  assert(physicalIndex(1,0) == 16 && physicalIndex(1,16) == 287);
+  assert(physicalIndex(0,15) == 0 && physicalIndex(16,15) == 512);
+  assert(physicalIndex(1,15) == 31 && physicalIndex(17,15) == 543);
+  assert(physicalIndex(17,0) == 528 && physicalIndex(17,16) == 799);
+  assert(physicalIndex(0,31) == 271 && physicalIndex(16,31) == 783);
   assert(physicalIndex(31,31) == 1008);
   assert(payloadCrc32(reinterpret_cast<const uint8_t *>("123456789"),9) == 0xcbf43926);
 
+  // Every possible incoming RGB565 color is attenuated, never boosted.
+  for (uint32_t value=0; value<65536; ++value) {
+    CRGB decoded = decodeRgb565(value), limited = limitPixelBrightness(decoded);
+    assert(int(limited.r) + limited.g + limited.b <= 64);
+    assert(limited.r <= decoded.r && limited.g <= decoded.g && limited.b <= decoded.b);
+  }
   setup();
   assert(Serial0.rxSize >= 2*(2048+16));
   assert(FastLED.lanes.size() == 4);
+  const int expectedPins[] = {11, 10, 13, 12};
   for (int panel=0; panel<4; ++panel) {
-    assert(FastLED.lanes[panel].pin == 10+panel);
+    assert(FastLED.lanes[panel].pin == expectedPins[panel]);
     assert(FastLED.lanes[panel].data == leds+panel*256);
     assert(FastLED.lanes[panel].length == 256);
   }
@@ -148,9 +165,9 @@ int main() {
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
   assert(!FastLED.inFlight);
-  assert(leds[15].r == 255 && leds[256].g == 255);
-  assert(leds[512].b == 255);
-  assert(leds[768].r == 255 && leds[768].g == 255 && leds[768].b == 255);
+  assert(leds[0].r == 64 && leds[256].g == 64);
+  assert(leds[527].b == 64);
+  assert(leds[768].r == 21 && leds[768].g == 21 && leds[768].b == 21);
   const int shows = FastLED.shows;
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
@@ -167,7 +184,7 @@ int main() {
   request(PACKET_FRAME, 2, frame);
   response(STATUS_ACK, 0, 2);
   assert(!Serial0.receivedDuringDMA && !FastLED.inFlight);
-  assert(leds[15].b == 255 && leds[15].r == 0);
+  assert(leds[0].b == 64 && leds[0].r == 0);
 
   request(PACKET_CLEAR, 99, {});
   response(STATUS_ACK, 0, 99);
@@ -175,7 +192,14 @@ int main() {
   for (auto &led : leds) assert(led.r == 0 && led.g == 0 && led.b == 0);
   request(PACKET_FRAME, 2, frame);  // Same sequence can redraw after CLEAR.
   response(STATUS_ACK, 0, 2);
-  assert(!FastLED.inFlight && leds[15].b == 255);
+  assert(!FastLED.inFlight && leds[0].b == 64);
+  // A full-white packet cannot bypass limits, even if global settings changed.
+  FastLED.setBrightness(255);
+  FastLED.setDither(1);
+  request(PACKET_FRAME, 3, std::vector<uint8_t>(2048, 255));
+  response(STATUS_ACK, 0, 3);
+  for (const auto &color : leds) assert(color.r == 21 && color.g == 21 && color.b == 21);
+  showMatrixCoverageTest();  // The startup diagnostic uses the same limiter.
   FastLED.wait();
 }
 """

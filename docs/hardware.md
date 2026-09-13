@@ -15,8 +15,11 @@ horizontal serpentine wiring (the first row runs left to right):
 
 | | Left | Right |
 | :-- | :-- | :-- |
-| Top | IO10 → panel 1 DIN | IO11 → panel 2 DIN |
-| Bottom | IO12 → panel 3 DIN | IO13 → panel 4 DIN |
+| Top | IO11 → panel 1 DIN | IO10 → panel 2 DIN |
+| Bottom | IO13 → panel 3 DIN | IO12 → panel 4 DIN |
+
+The firmware mirrors the image horizontally within the two left panels
+(IO11 and IO13). The right panels keep their normal image orientation.
 
 Each arrow above goes through its own **3.3 V → 5 V level-shifter channel**
 (e.g. one 74AHCT125 chip provides four channels), followed by a 330–470 Ω
@@ -51,7 +54,14 @@ Use wire sizes, connectors, fuses and power injection suitable for the actual
 panel current and cable lengths. Keep the external +5 V off the USB-powered
 ESP32's 5 V pin unless the specific board supports that arrangement.
 
-The live firmware uses maximum brightness **255/255** and an estimated **2 A total**
+Live frames and the startup diagnostic also clamp each pixel to a total
+`R + G + B` of **64**, preserving color ratios and never boosting dim pixels.
+Temporal dithering is disabled, and both limits are reapplied before every
+non-black transmission. Even a valid full-white host frame is limited. This
+bounds the values sent by firmware; it cannot guarantee brightness if the
+data signal is corrupted after leaving the controller.
+
+The live firmware caps global brightness at **72/255** and an estimated **2 A total**
 FastLED power budget across all four panels. This deliberately low budget
 will dim large bright areas. It is a software estimate, not a hardware current
 limiter or a specification for a suitable supply. Size the supply using your

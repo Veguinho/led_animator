@@ -115,7 +115,7 @@ Once streaming starts, a **Live palette** panel opens in your browser at
 edit up to six colors with color pickers or hex codes; combine them as a smooth
 gradient or solid bands; reverse their order; and adjust brightness and
 saturation. All changes apply to the next audio frame in either style, with a
-live preview matching the selected display size. **Reset defaults** restores dim red, 20% slowdown, and 6.3% manual brightness. Settings are not saved between runs.
+live preview matching the selected display size. **Reset defaults** restores dim red, 20% slowdown, and 6.3% manual brightness. The background service saves settings between runs; direct command-line streams do so only when given `--settings-file PATH`.
 
 Choose **Moving rainbow** for a continuous rainbow that travels smoothly
 from left to right across the X axis. It works with both wave and spectrum.
@@ -184,9 +184,10 @@ controls.
 Click **Refresh app** at the top of the controls page to restart the visualizer
 and reload the page in the same tab. The button briefly pauses the LEDs, closes
 the audio and USB connections, then loads the current code and reconnects.
-Live edits reset to the startup settings. The Dock launcher remains active to
-prevent a second stream from starting during the refresh. If the app has stopped
-completely, launch it from the Dock again.
+Live edits are restored when running the background service or using
+`--settings-file PATH`; other streams reset to startup settings. The Dock launcher
+prevents a second app stream from starting during refresh. The background service
+automatically restarts a worker that exits.
 
 Both styles follow the audio level in dBFS: loud passages grow and glow more,
 while quiet passages stay smaller and dimmer.
@@ -209,6 +210,37 @@ board profile with `--fqbn` when needed. All remaining options, such as
 
 ## Clickable Mac app and Dock shortcut
 
+### Keep streaming in the background
+
+Start a per-user macOS LaunchAgent that runs independently of Terminal and
+automatically restarts after the audio worker exits:
+
+```bash
+.venv/bin/python audio_service.py start --port /dev/cu.usbserial-1420
+```
+
+The service starts at login and retries after exits, with a five-second minimum
+between launches. Audio capture and the board handshake can add startup time.
+It saves palette, brightness, and slowdown in `.build/audio-palette.json` and
+writes playback/error logs to `.build/audio-service.log`. The Mac must be awake
+and the board connected to stream. Open <http://127.0.0.1:8765> for controls.
+Once installed, the Dock shortcut starts or reuses this service, so closing
+Terminal or the browser does not stop playback.
+
+```bash
+.venv/bin/python audio_service.py status
+.venv/bin/python audio_service.py stop
+.venv/bin/python audio_service.py uninstall
+```
+
+`stop` disables recovery until the next start or login. `uninstall` also removes
+the login service. Firmware uploads and mode switches through the project
+launchers stop the service before opening the USB port. To return to automatic
+audio recovery afterward, run `audio_service.py start` again. Use `--port auto`
+when starting if USB port names may change and only one board is connected.
+
+### Install the Dock shortcut
+
 Install the launcher in your personal Applications folder and pin it to the Dock:
 
 ```bash
@@ -223,7 +255,7 @@ If macOS requests audio recording access, allow Terminal in **System Settings �
 Privacy & Security → Screen & System Audio Recording → System Audio Recording
 Only**. Screen recording access is not required.
 
-Keep the Terminal window open while using the visualizer. Press **Control-C** in
+Without the background service, keep the Terminal window open while using the visualizer. Press **Control-C** in
 that window to stop streaming and clear the LEDs. Closing the browser only closes
 the controls; it does not stop playback. Clicking the Dock shortcut again while
 an app-launched stream is running reopens the controls without starting a second
@@ -263,6 +295,7 @@ The brightness slider sets the software level from 0% to 100% (about 6.3% by def
 There is no automatic brightness cycle or peak normalization. The final
 output stage only smooths frame changes over 0.5 seconds; it does not boost
 dim frames. Audio-reactive effects still follow the music and fade in silence.
-The firmware brightness ceiling is 255/255. These percentages
+The firmware brightness ceiling is 72/255, a 12.5% increase over the previous
+64/255 scale for both dim and bright pixels; black stays off. These percentages
 are software levels, not a measurement of physical light output. This limit
 cannot prevent flashes caused by corrupted LED signals or faulty wiring.

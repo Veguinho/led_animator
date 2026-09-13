@@ -6,6 +6,7 @@ import colorsys
 import copy
 import json
 import re
+import sys
 import threading
 import uuid
 from collections.abc import Callable
@@ -136,11 +137,18 @@ def make_adaptive_palette(
 class PaletteControls:
     """Publish whole palettes atomically; rendering owns its animation state."""
 
-    def __init__(self, slowdown: float = DEFAULT_SLOWDOWN, *, size: int = 16) -> None:
+    def __init__(self, slowdown: float = DEFAULT_SLOWDOWN, *, size: int = 16,
+                 settings_path: Path | None = None) -> None:
         self.size = size
         self._lock = threading.Lock()
         self._settings = validate_settings(default_settings() | {"slowdown": slowdown})
-        self._palette = make_palette(size=self.size)
+        self._settings_path = settings_path
+        if settings_path is not None and settings_path.exists():
+            try:
+                self._settings = validate_settings(json.loads(settings_path.read_text()))
+            except (OSError, ValueError) as exc:
+                print(f"Could not restore palette; using defaults: {exc}", file=sys.stderr)
+        self._palette = make_palette(self._settings, size=self.size)
         self._display_palette = self._palette.copy()
         self._revision = 0
         self._frame = np.zeros((self.size, self.size, 3), dtype=np.uint8)
@@ -149,6 +157,11 @@ class PaletteControls:
         validated = validate_settings(settings)
         palette = make_palette(validated, size=self.size)
         with self._lock:
+            if self._settings_path is not None:
+                self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self._settings_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(validated) + "\n")
+                temporary.replace(self._settings_path)
             self._settings = validated
             self._palette = palette
             self._display_palette = palette.copy()
@@ -237,6 +250,9 @@ class PaletteServer:
                         controls.update(payload)
                 except (ValueError, UnicodeError) as exc:
                     self.json_response(400, {"error": str(exc)})
+                    return
+                except OSError:
+                    self.json_response(500, {"error": "could not save palette settings"})
                     return
                 if self.path == "/api/refresh":
                     if on_refresh is None:
