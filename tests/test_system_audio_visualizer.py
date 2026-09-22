@@ -194,14 +194,15 @@ class AudioVisualizerTests(unittest.TestCase):
 
     def test_default_live_styles_stay_within_the_dim_red_test_level(self):
         for style in ("wave", "spectrum"):
-            for controls in (None, PaletteControls(size=32)):
-                with self.subTest(style=style, controls=controls is not None):
-                    visualizer = AudioVisualizer(style, controls=controls, size=32)
-                    for _ in range(80):
-                        frame = visualizer.render(self.tone(0.9, 440))
-                        self.assertLessEqual(int(frame.max()), 16)
-                        self.assertFalse(np.any(frame[:, :, 1:]))
-                    self.assertGreater(int(frame.max()), 0)
+            for size in (32, 48):
+                for controls in (None, PaletteControls(size=size)):
+                    with self.subTest(style=style, size=size, controls=controls is not None):
+                        visualizer = AudioVisualizer(style, controls=controls, size=size)
+                        for _ in range(80):
+                            frame = visualizer.render(self.tone(0.9, 440))
+                            self.assertLessEqual(int(frame.max()), 16)
+                            self.assertFalse(np.any(frame[:, :, 1:]))
+                        self.assertGreater(int(frame.max()), 0)
 
     def test_live_palette_recolors_both_styles_and_clears_old_trails(self):
         for style, slowdown in (("wave", 0), ("spectrum", 0), ("wave", 75), ("spectrum", 75)):

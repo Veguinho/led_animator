@@ -74,8 +74,8 @@ class RefreshLifecycleTests(unittest.TestCase):
             return server
 
         def stream(connection, source, **kwargs):
-            self.assertEqual(source.size, 32)
-            self.assertEqual(kwargs["display_size"], 32)
+            self.assertEqual(source.size, 48)
+            self.assertEqual(kwargs["display_size"], 48)
             refresh()
             next(source.iter_frames())
 
@@ -98,7 +98,7 @@ class RefreshLifecycleTests(unittest.TestCase):
         self.assertEqual(executable, app.sys.executable)
         self.assertEqual(argv[1], str(Path(app.__file__).resolve()))
         restarted = app.build_parser().parse_args(argv[2:])
-        self.assertEqual(restarted.display_size, 32)
+        self.assertEqual(restarted.display_size, 48)
         self.assertEqual((restarted.style, restarted.fps, restarted.slowdown), ("spectrum", 60, 50))
         self.assertEqual(restarted.controls_port, 49123)
         self.assertTrue(restarted.no_browser)

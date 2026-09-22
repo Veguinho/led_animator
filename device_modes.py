@@ -55,7 +55,7 @@ def flash_firmware(mode: str, port: str) -> None:
     if mode == "audio":
         sketch = ROOT / "cs2_16x16_player_firmware"
         fqbn = AUDIO_FQBN
-        build = ROOT / ".build/panel32"
+        build = ROOT / ".build/panel48"
     else:
         sketch = ROOT / "preloaded_video/preloaded_video_firmware"
         fqbn = VIDEO_FQBN

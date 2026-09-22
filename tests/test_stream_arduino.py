@@ -34,6 +34,48 @@ class FakeSerial:
 
 
 class StreamingProtocolTests(unittest.TestCase):
+    def test_live_stream_rebases_after_cpu_stall_without_catchup_burst(self):
+        source = stream_arduino.FrameSource(
+            10,
+            lambda: iter([bytes([value]) * 512 for value in range(3)]),
+        )
+        clock = mock.Mock(side_effect=[
+            0.0,  # statistics start
+            0.0, 0.0,  # first frame deadline and current time
+            0.0,  # first frame statistics
+            0.35,  # second frame current time: CPU stalled
+            0.35,  # second frame statistics
+            0.35,  # third frame current time
+            0.45,  # third frame statistics after its paced sleep
+        ])
+        sent_at = []
+
+        def exchange(*_args):
+            sent_at.append(clock.call_args_list[-1])
+
+        with (
+            mock.patch.object(stream_arduino.time, "monotonic", clock),
+            mock.patch.object(stream_arduino.time, "sleep") as sleep,
+            mock.patch.object(stream_arduino, "exchange_packet", side_effect=exchange),
+        ):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=False, rebase_late=True, display_size=16,
+            )
+
+        self.assertEqual(result, (3, 0))
+        self.assertEqual(len(sent_at), 3)
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.1)
+
+    def test_live_stream_rejects_conflicting_late_policies(self):
+        source = stream_arduino.FrameSource(10, lambda: iter([bytes(512)]))
+        with self.assertRaisesRegex(ValueError, "cannot both"):
+            stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=True, rebase_late=True,
+            )
+
     def test_48_pixel_handshake(self):
         connection = mock.Mock()
         with mock.patch.object(stream_arduino, "exchange_packet") as exchange:

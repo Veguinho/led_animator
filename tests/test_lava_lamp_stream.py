@@ -19,10 +19,10 @@ class LavaLampFluidTests(unittest.TestCase):
         self.assertLessEqual(simulation.dt, 0.05)
         self.assertTrue(np.any(frame[..., 0]))
 
-    def test_defaults_match_the_16x16_stream(self):
+    def test_defaults_match_the_protected_48x48_stream(self):
         args = build_parser().parse_args([])
 
-        self.assertEqual(args.fps, 20.0)
+        self.assertEqual(args.fps, 12.0)
         self.assertEqual(args.simulation_size, DEFAULT_SIMULATION_SIZE)
         self.assertEqual(args.simulation_size % 16, 0)
 

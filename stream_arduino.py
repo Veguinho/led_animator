@@ -28,10 +28,10 @@ from led_animator import (
 WIDTH = 16
 HEIGHT = 16
 FRAME_BYTES = WIDTH * HEIGHT * 2
-DEFAULT_DISPLAY_SIZE = 32
+DEFAULT_DISPLAY_SIZE = 48
 SERIAL_BAUD = 2_000_000
 # Leave room for decoding and parallel LED submission as well as UART traffic.
-DEFAULT_STREAM_FPS = 20.0
+DEFAULT_STREAM_FPS = 12.0
 DEFAULT_PORT_WAIT = 30.0
 
 # Common USB serial names on macOS, Linux, and boards using WCH or Silicon Labs
@@ -336,11 +336,15 @@ def stream_frames(
     timeout: float,
     retries: int,
     drop_late: bool,
+    rebase_late: bool = False,
     display_size: int = 16,
 ) -> tuple[int, int]:
+    if drop_late and rebase_late:
+        raise ValueError("drop_late and rebase_late cannot both be enabled")
     timeline_index = 0
     sent = 0
     dropped = 0
+    resynced = 0
     period = 1.0 / source.fps
     stats_start = time.monotonic()
     stats_sent = 0
@@ -358,10 +362,20 @@ def stream_frames(
             pass_index = frames_this_pass - 1
             deadline = pass_start + pass_index * period
             now = time.monotonic()
-            if drop_late and now - deadline >= period:
-                dropped += 1
-                timeline_index += 1
-                continue
+            if now - deadline >= period:
+                if rebase_late:
+                    # A live/procedural source has no timeline worth catching
+                    # up. Keep the last valid panel frame during the pause,
+                    # send this newly rendered frame once, and establish a new
+                    # evenly spaced clock. This avoids CPU stalls turning into
+                    # bursts of discarded animation states and visible jumps.
+                    resynced += max(1, int((now - deadline) // period))
+                    pass_start = now - pass_index * period
+                    deadline = now
+                elif drop_late:
+                    dropped += 1
+                    timeline_index += 1
+                    continue
             if now < deadline:
                 time.sleep(deadline - now)
             exchange_packet(
@@ -381,8 +395,15 @@ def stream_frames(
                 )
             stats_now = time.monotonic()
             if stats_now - stats_start >= 5:
-                print(f"Live playback: {(sent - stats_sent)/(stats_now - stats_start):.1f} FPS; "
-                      f"{dropped} late frames skipped total", file=sys.stderr, flush=True)
+                timing = f"{dropped} late frames skipped total"
+                if rebase_late:
+                    timing = f"{resynced} late intervals smoothly resynchronized total"
+                print(
+                    f"Live playback: {(sent - stats_sent)/(stats_now - stats_start):.1f} FPS; "
+                    f"{timing}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 stats_start, stats_sent = stats_now, sent
             timeline_index += 1
         if frames_this_pass == 0:
@@ -410,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="maximum streaming FPS (default: 20 for 32x32 at 2,000,000 baud)",
+        help="maximum streaming FPS (default: 12 with per-lane 48x48 protection)",
     )
     parser.add_argument(
         "--led-gamma",

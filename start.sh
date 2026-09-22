@@ -100,17 +100,17 @@ if [[ "$upload" == true ]]; then
   fi
 
   echo "Compiling the ESP32 sketch for $fqbn..." >&2
-  "$arduino_cli" compile --fqbn "$fqbn" --build-path "$PROJECT_DIR/.build/panel32" "$SKETCH_DIR"
+  "$arduino_cli" compile --fqbn "$fqbn" --build-path "$PROJECT_DIR/.build/panel48" "$SKETCH_DIR"
   "$project_python" -c 'from device_modes import stop_mode_workers; stop_mode_workers()'
   echo "Uploading the sketch through $port..." >&2
-  "$arduino_cli" upload --port "$port" --fqbn "$fqbn" --input-dir "$PROJECT_DIR/.build/panel32" "$SKETCH_DIR"
+  "$arduino_cli" upload --port "$port" --fqbn "$fqbn" --input-dir "$PROJECT_DIR/.build/panel48" "$SKETCH_DIR"
 fi
 
 "$project_python" -c 'from device_modes import stop_mode_workers; stop_mode_workers()'
 echo "Starting the live spectrum on $port..." >&2
 exec "$project_python" "$PROJECT_DIR/system_audio_visualizer.py" \
-  --display-size 32 \
-  --fps 20 \
+  --display-size 48 \
+  --fps 12 \
   --port "$port" \
   --clear-on-exit \
   "${visualizer_args[@]}"

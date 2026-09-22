@@ -63,10 +63,10 @@ class FakeBoard:
 
 
 class PreloadedVideoTests(unittest.TestCase):
-    def test_video_preparation_preserves_native_32_pixel_corners(self):
-        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    def test_video_preparation_preserves_native_48_pixel_corners(self):
+        frame = np.zeros((48, 48, 3), dtype=np.uint8)
         frame[0, 0] = (255, 0, 0)
-        frame[31, 31] = (0, 0, 255)
+        frame[47, 47] = (0, 0, 255)
         process = mock.Mock(stdout=io.BytesIO(frame.tobytes()))
         process.wait.return_value = 0
         process.poll.return_value = 0
@@ -76,11 +76,11 @@ class PreloadedVideoTests(unittest.TestCase):
             mock.patch.object(player.subprocess, "Popen", return_value=process) as spawn,
         ):
             clip = player.prepare_clip(Path("clip.mp4"), 30, gamma=1, brightness=1, smooth_ms=0)
-        self.assertEqual(len(clip.data), 2048)
+        self.assertEqual(len(clip.data), 4608)
         self.assertEqual(clip.frames, 1)
         self.assertEqual(struct.unpack_from("<H", clip.data, 0)[0], 0xf800)
-        self.assertEqual(struct.unpack_from("<H", clip.data, 2046)[0], 0x001f)
-        self.assertIn("scale=32:32:flags=area", " ".join(spawn.call_args.args[0]))
+        self.assertEqual(struct.unpack_from("<H", clip.data, 4606)[0], 0x001f)
+        self.assertIn("scale=48:48:flags=area", " ".join(spawn.call_args.args[0]))
 
     def test_video_connect_keeps_boot_speed_separate_from_live_default(self):
         connection = mock.Mock(baudrate=player.BOOT_BAUD)
@@ -95,7 +95,7 @@ class PreloadedVideoTests(unittest.TestCase):
 
     def test_benchmark_verifies_data_without_playing(self):
         board = FakeBoard()
-        clip = player.Clip(bytes(range(256)) * 40, 30)
+        clip = player.Clip(bytes(range(256)) * 36, 30)
         with mock.patch("sys.stdout", new_callable=io.StringIO):
             player.preload(board, clip, play=False)
         self.assertEqual(board.commands[-1], player.VERIFY)
@@ -132,7 +132,7 @@ class PreloadedVideoTests(unittest.TestCase):
 
     def test_chunk_retry_preserves_clip_and_play_waits_for_complete_upload(self):
         board = FakeBoard(lose_chunk_ack=True)
-        clip = player.Clip(bytes(range(256)) * 40, 60)
+        clip = player.Clip(bytes(range(256)) * 36, 60)
         with mock.patch("sys.stdout", new_callable=io.StringIO):
             player.preload(board, clip)
         self.assertEqual(bytes(board.data), clip.data)
@@ -201,7 +201,7 @@ class PreloadedVideoTests(unittest.TestCase):
 #include <vector>
 #include "clip_buffer.h"
 int main() {
-  static_assert(FRAME_BYTES == 2048);
+  static_assert(FRAME_BYTES == 4608);
   std::vector<uint8_t> storage(FRAME_BYTES * 3), frames(FRAME_BYTES * 3, 42);
   ClipBuffer clip;
   clip.data = storage.data(); clip.capacity = storage.size();

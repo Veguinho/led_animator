@@ -1,14 +1,21 @@
 #include <FastLED.h>
+#include "platforms/esp/32/drivers/lcd_spi/bus_traits.h"
 #include "panel_layout.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S3)
 #error "This sketch requires an ESP32-S3."
 #endif
 
-constexpr uint8_t BRIGHTNESS = 72;
+// Bake the old 72/255 global brightness into every pixel byte before it reaches
+// any output lane. Keep the driver at 255 so all nine GPIOs transmit the same
+// already-limited values, including the top-right panel on GPIO9.
+constexpr uint8_t OUTPUT_SCALE = 72;
+constexpr uint8_t DRIVER_BRIGHTNESS = 255;
 constexpr uint16_t MAX_PIXEL_RGB_TOTAL = 64;
+constexpr uint16_t MAX_TRANSMITTED_RGB_TOTAL =
+    MAX_PIXEL_RGB_TOTAL * OUTPUT_SCALE / 255;
 
-// Total estimated LED budget across ALL four panels. Keep the existing limit
+// Total estimated LED budget across ALL nine panels. Keep the existing limit
 // until the external 5 V supply, fuses and power wiring have been sized.
 // This software estimate is not a substitute for hardware current protection.
 constexpr uint32_t MAX_POWER_MILLIAMPS = 2000;
@@ -101,6 +108,9 @@ CRGB limitPixelBrightness(CRGB color) {
     color.g = static_cast<uint16_t>(color.g) * MAX_PIXEL_RGB_TOTAL / total;
     color.b = static_cast<uint16_t>(color.b) * MAX_PIXEL_RGB_TOTAL / total;
   }
+  color.r = static_cast<uint16_t>(color.r) * OUTPUT_SCALE / 255;
+  color.g = static_cast<uint16_t>(color.g) * OUTPUT_SCALE / 255;
+  color.b = static_cast<uint16_t>(color.b) * OUTPUT_SCALE / 255;
   return color;
 }
 
@@ -110,7 +120,7 @@ void showLimitedFrame() {
     leds[index] = limitPixelBrightness(leds[index]);
   }
   // Reapply the ceilings at every transmission, including startup tests.
-  FastLED.setBrightness(BRIGHTNESS);
+  FastLED.setBrightness(DRIVER_BRIGHTNESS);
   FastLED.setDither(0);
   FastLED.show();
   FastLED.wait();
@@ -270,13 +280,20 @@ void setup() {
   // Allow margin for USB packet gaps and incomplete frames.
   PANEL_SERIAL.setTimeout(500);
 
-  // Use the same RMT-backed controllers as the working single-panel sketch.
-  static_assert(PANEL_COUNT == 4, "This firmware configures four RMT outputs.");
-  FastLED.addLeds<WS2812B, DATA_PINS[0], GRB>(leds, PANEL_LEDS);
-  FastLED.addLeds<WS2812B, DATA_PINS[1], GRB>(leds + PANEL_LEDS, PANEL_LEDS);
-  FastLED.addLeds<WS2812B, DATA_PINS[2], GRB>(leds + 2 * PANEL_LEDS, PANEL_LEDS);
-  FastLED.addLeds<WS2812B, DATA_PINS[3], GRB>(leds + 3 * PANEL_LEDS, PANEL_LEDS);
-  FastLED.setBrightness(BRIGHTNESS);
+  // Use the ESP32-S3 parallel LCD_CAM channel driver. Runtime channel
+  // configuration is also required because GPIO20 is valid for this
+  // CH340/UART board but intentionally blocked by FastLED's compile-time API
+  // as the native USB D+ pin.
+  static_assert(PANEL_COUNT == 9, "This firmware configures nine panel outputs.");
+  FastLED.setExclusiveDriver<fl::Bus::LCD_CLOCKLESS>();
+  fl::ChannelOptions options;
+  options.mBus = fl::Bus::LCD_CLOCKLESS;
+  for (uint8_t panel = 0; panel < PANEL_COUNT; ++panel) {
+    FastLED.add(fl::ChannelConfig(
+        fl::makeClockless<fl::TIMING_WS2812_800KHZ>(DATA_PINS[panel]),
+        fl::span<CRGB>(leds + panel * PANEL_LEDS, PANEL_LEDS), GRB, options));
+  }
+  FastLED.setBrightness(DRIVER_BRIGHTNESS);
   FastLED.setDither(0);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, MAX_POWER_MILLIAMPS);
   FastLED.clear(true);

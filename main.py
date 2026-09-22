@@ -12,8 +12,8 @@ from stream_arduino import resolve_port
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
-        print("1. Live audio wave — 32×32, 20 FPS over USB")
-        print("2. Preloaded video — 32×32, dimmed and smoothed at 30 FPS")
+        print("1. Live audio wave — 48×48, 12 FPS over USB")
+        print("2. Preloaded video — 48×48, dimmed and smoothed at 30 FPS")
         choice = input("Choose mode [1/2]: ").strip()
         if choice not in ("1", "2"):
             print("Choose 1 or 2.", file=sys.stderr)

@@ -293,8 +293,9 @@ uses generated tones; actual motion follows whatever is playing on your Mac.
 
 The brightness slider sets the software level from 0% to 100% (about 6.3% by default, matching the dim red test at 16/255).
 There is no automatic brightness cycle or peak normalization. The final
-output stage only smooths frame changes over 0.5 seconds; it does not boost
-dim frames. Audio-reactive effects still follow the music and fade in silence.
+output stage uses a 0.15-second rise and 0.30-second fall; it does not boost dim
+frames. Beats appear quickly while the gentler release avoids abrupt flashes.
+Audio-reactive effects still follow the music and fade in silence.
 The firmware brightness ceiling is 72/255, a 12.5% increase over the previous
 64/255 scale for both dim and bright pixels; black stays off. These percentages
 are software levels, not a measurement of physical light output. This limit
