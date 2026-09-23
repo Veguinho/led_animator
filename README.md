@@ -17,11 +17,12 @@ All nine panels use the same clockwise rotation and horizontal mirror correction
 
 Live audio starts in red at 50% software brightness, with
 manual brightness control, softened frame changes and a 2 A whole-panel firmware power ceiling.
-The previews below show the original 16×16 effects. The
+The buffered-video preview below shows the current 48×48 output. The other
+animated previews retain their original 16×16 presentation. The
 [32×32 spectrum preview](docs/32x32-preview.md) documents the previous
 four-panel layout; current live frames scale to fill the 48×48 screen.
 
-[32×32 preview](docs/32x32-preview.md) · [Quick start](#quick-start) · [Hardware](docs/hardware.md) ·
+[48×48 MP4 preview](docs/assets/video-48x48.mp4) · [32×32 preview](docs/32x32-preview.md) · [Quick start](#quick-start) · [Hardware](docs/hardware.md) ·
 [Live streaming](docs/live-streaming.md) · [Video conversion](docs/video-conversion.md)
 
 Choose live audio or locally buffered video with `python main.py`.
@@ -36,12 +37,22 @@ of measured payload throughput); firmware flashing remains at 115200 baud.
 
 ```bash
 python main.py audio
-python main.py mp4 video_clips/clip.mp4 --seconds 10
+python main.py mp4 video_clips/clip.mp4
 ```
 
 ## See it in motion
 
 <table>
+  <tr>
+    <td align="center" colspan="2">
+      <a href="docs/assets/video-48x48.mp4">
+        <img src="docs/assets/video-48x48.gif" width="288" alt="Pixel-sharp preview of the contrast-enhanced video rendered at the LED screen's native 48×48 resolution">
+      </a>
+      <br><strong>Buffered 48×48 MP4 playback</strong>
+      <br>Actual S-curve-enhanced LED frames at 6 FPS, enlarged without smoothing.
+      <br><a href="docs/assets/video-48x48.mp4">Watch the 48×48 MP4 preview</a>
+    </td>
+  </tr>
   <tr>
     <td align="center" width="50%">
       <a href="docs/assets/lava-lamp.mp4">
@@ -72,7 +83,9 @@ python main.py mp4 video_clips/clip.mp4 --seconds 10
   </tr>
 </table>
 
-The audio previews use real Mac system audio recorded during playback.
+The 48×48 MP4 preview is a silent eight-second excerpt from the prepared video
+cache. Its nearest-neighbor enlargement preserves the exact pixel layout sent
+to the screen. The audio previews use real Mac system audio recorded during playback.
 Adaptive captures the running visualizer's live frames at 60% brightness and
 20% slowdown. Both audio MP4s include the recorded sound; the inline GIFs are
 silent. The lava is a seeded fluid simulation.

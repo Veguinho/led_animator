@@ -44,6 +44,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def stream_with_resume(forwarded: list[str], controls: PlaybackControls) -> int:
+    """Reconnect without replaying frames already acknowledged by the board."""
+    next_frame = 0
+
+    def remember_progress(frame: int) -> None:
+        nonlocal next_frame
+        next_frame = frame
+
+    while True:
+        controls.set_connection("connecting")
+        result = stream_arduino.main(
+            [*forwarded, "--start-frame", str(next_frame)],
+            playback_paused=controls.paused,
+            connection_status=controls.set_connection,
+            progress_callback=remember_progress,
+        )
+        if result in (0, 130):
+            return result
+        controls.set_connection("reconnecting")
+        print(
+            f"LED stream disconnected; resuming at frame {next_frame} in 2 seconds…",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(2)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     server = None
@@ -83,18 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             forwarded.append("--no-drop")
         if args.clear_on_exit:
             forwarded.append("--clear-on-exit")
-        while True:
-            controls.set_connection("connecting")
-            result = stream_arduino.main(
-                forwarded,
-                playback_paused=controls.paused,
-                connection_status=controls.set_connection,
-            )
-            if result in (0, 130):
-                return result
-            controls.set_connection("reconnecting")
-            print("LED stream disconnected; retrying in 2 seconds…", file=sys.stderr, flush=True)
-            time.sleep(2)
+        return stream_with_resume(forwarded, controls)
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

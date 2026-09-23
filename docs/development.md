@@ -51,6 +51,12 @@ signal using the live Sunset spectrum renderer. It is the image shown in the
 
 The animated previews use recorded audio and the original 16×16 presentation.
 
+The README's buffered-video sample uses eight seconds from an already prepared
+48×48 high-dynamic cache. The MP4 enlarges those exact frames to 384×384 and
+the inline GIF to 288×288 with nearest-neighbor scaling, so neither preview
+introduces smoothing that is absent on the LED screen. Both files are silent:
+`docs/assets/video-48x48.mp4` and `docs/assets/video-48x48.gif`.
+
 Install the usual Python requirements and FFmpeg. Use a fresh audio recording,
 or extract the soundtrack from the existing preview:
 

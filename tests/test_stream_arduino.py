@@ -1,4 +1,5 @@
 import struct
+import threading
 import unittest
 import zlib
 from pathlib import Path
@@ -152,6 +153,40 @@ class StreamingProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot exceed"):
             stream_arduino.buffered_source(source, 1, 2)
 
+    def test_closing_bounded_buffer_stops_its_decoder(self):
+        stopped = threading.Event()
+
+        def frames():
+            try:
+                index = 0
+                while True:
+                    yield bytes([index % 256])
+                    index += 1
+            finally:
+                stopped.set()
+
+        source = stream_arduino.FrameSource(10, frames, size=48)
+        buffered = stream_arduino.buffered_source(source, 0.2, 0.1)
+        iterator = buffered.iter_frames()
+        next(iterator)
+        iterator.close()
+
+        self.assertTrue(stopped.wait(1))
+
+    def test_stream_reports_the_next_source_frame_for_reconnect(self):
+        source = stream_arduino.FrameSource(
+            60, lambda: iter([bytes(512), bytes(512)]), size=16
+        )
+        progress = []
+        with mock.patch.object(stream_arduino, "exchange_packet"):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=False, source_start_frame=120,
+                progress_callback=progress.append,
+            )
+        self.assertEqual(result, (2, 0))
+        self.assertEqual(progress, [121, 122])
+
     def test_32_pixel_handshake(self):
         connection = mock.Mock()
         with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
@@ -255,6 +290,30 @@ class StreamingProtocolTests(unittest.TestCase):
         self.assertEqual(first_red, 0)
         # Gamma 2.2 maps video red 120 to LED intensity 49 before RGB565.
         self.assertEqual(second_red, (49 >> 3) << 11)
+
+    def test_video_resume_skips_acknowledged_output_frames(self):
+        frames = []
+        for index in range(6):
+            frame = np.zeros((16, 16, 3), dtype=np.uint8)
+            frame[0, 0] = [index * 40, 0, 0]
+            frames.append(frame)
+
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(
+                stream_arduino, "probe_video",
+                return_value=VideoInfo(16, 16, 6.0),
+            ),
+            mock.patch.object(
+                stream_arduino, "iter_square_video_frames",
+                return_value=iter(frames),
+            ),
+        ):
+            source = open_video(Path("sample.mp4"), target_fps=2.0, start_frame=1)
+            compiled = list(source.iter_frames())
+
+        self.assertEqual(len(compiled), 1)
+        self.assertEqual(struct.unpack_from("<H", compiled[0])[0], (49 >> 3) << 11)
 
     def test_rejects_invalid_target_fps(self):
         with (

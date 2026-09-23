@@ -9,6 +9,9 @@ Streaming does **not** load the whole prepared video. A bounded queue defaults
 to three seconds and waits for one second of prebuffer before playback. FFmpeg
 blocks when the queue is full, keeping RAM approximately constant even for
 multi-hour videos. Playback defaults to a stable 6 FPS on the current hardware.
+If the USB/controller connection is interrupted, playback reconnects at the
+next unplayed frame instead of restarting the video from the beginning. The
+abandoned decoder and its bounded queue are closed during that handoff.
 
 ```bash
 python main.py mp4 video_clips/clip.mp4

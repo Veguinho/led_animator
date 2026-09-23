@@ -26,6 +26,8 @@ output/
 !docs/assets/audio-spectrum.mp4
 !docs/assets/audio-adaptive.gif
 !docs/assets/audio-adaptive.mp4
+!docs/assets/video-48x48.gif
+!docs/assets/video-48x48.mp4
 
 # Local source videos can also be large; retain only the folder itself.
 video_clips/*

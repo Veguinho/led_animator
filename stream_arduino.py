@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import math
 import queue
 import struct
@@ -207,6 +208,7 @@ def open_video(
     target_fps: float | None = None,
     led_gamma: float = LED_INTENSITY_GAMMA,
     size: int = 16,
+    start_frame: int = 0,
 ) -> FrameSource:
     if not path.is_file():
         raise ValueError(f"video does not exist: {path}")
@@ -218,9 +220,20 @@ def open_video(
         raise ValueError("FPS must be a positive finite number")
     if not np.isfinite(led_gamma) or led_gamma <= 0:
         raise ValueError("LED gamma must be a positive finite number")
+    if start_frame < 0:
+        raise ValueError("start frame cannot be negative")
+    first_pass = True
+
+    def iter_frames() -> Iterator[bytes]:
+        nonlocal first_pass
+        skip = start_frame if first_pass else 0
+        first_pass = False
+        frames = iter_compiled_video(path, info.fps, fps, led_gamma, size)
+        return itertools.islice(frames, skip, None)
+
     return FrameSource(
         fps=fps,
-        iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma, size),
+        iter_frames=iter_frames,
         size=size,
     )
 
@@ -243,17 +256,32 @@ def buffered_source(
     def iter_frames() -> Iterator[bytes]:
         pending: queue.Queue[bytes | _ProducerFailure | object] = queue.Queue(capacity)
         ready = threading.Event()
+        stopped = threading.Event()
+
+        def enqueue(item: bytes | _ProducerFailure | object) -> bool:
+            while not stopped.is_set():
+                try:
+                    pending.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    pass
+            return False
 
         def produce() -> None:
+            frames = source.iter_frames()
             try:
-                for frame in source.iter_frames():
-                    pending.put(frame)
+                for frame in frames:
+                    if not enqueue(frame):
+                        break
                     if pending.qsize() >= prebuffer:
                         ready.set()
             except BaseException as exc:
-                pending.put(_ProducerFailure(exc))
+                enqueue(_ProducerFailure(exc))
             finally:
-                pending.put(_BUFFER_END)
+                close = getattr(frames, "close", None)
+                if close is not None:
+                    close()
+                enqueue(_BUFFER_END)
                 ready.set()
 
         worker = threading.Thread(target=produce, name="mp4-frame-decoder", daemon=True)
@@ -266,14 +294,23 @@ def buffered_source(
             file=sys.stderr,
             flush=True,
         )
-        while True:
-            item = pending.get()
-            if item is _BUFFER_END:
-                return
-            if isinstance(item, _ProducerFailure):
-                raise item.error
-            assert isinstance(item, bytes)
-            yield item
+        try:
+            while True:
+                item = pending.get()
+                if item is _BUFFER_END:
+                    return
+                if isinstance(item, _ProducerFailure):
+                    raise item.error
+                assert isinstance(item, bytes)
+                yield item
+        finally:
+            stopped.set()
+            while worker.is_alive():
+                try:
+                    pending.get_nowait()
+                except queue.Empty:
+                    pass
+                worker.join(timeout=0.1)
 
     return FrameSource(fps=source.fps, iter_frames=iter_frames, size=source.size)
 
@@ -403,10 +440,13 @@ def stream_frames(
     rebase_late: bool = False,
     display_size: int = 16,
     playback_paused: Callable[[], bool] | None = None,
+    source_start_frame: int = 0,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[int, int]:
     if drop_late and rebase_late:
         raise ValueError("drop_late and rebase_late cannot both be enabled")
     timeline_index = 0
+    source_frame_index = source_start_frame
     sent = 0
     dropped = 0
     resynced = 0
@@ -448,6 +488,9 @@ def stream_frames(
                 elif drop_late:
                     dropped += 1
                     timeline_index += 1
+                    source_frame_index += 1
+                    if progress_callback is not None:
+                        progress_callback(source_frame_index)
                     continue
             if now < deadline:
                 time.sleep(deadline - now)
@@ -479,10 +522,18 @@ def stream_frames(
                 )
                 stats_start, stats_sent = stats_now, sent
             timeline_index += 1
+            source_frame_index += 1
+            if progress_callback is not None:
+                progress_callback(source_frame_index)
         if frames_this_pass == 0:
+            if source_frame_index > 0 and not loop:
+                return sent, dropped
             raise RuntimeError("video produced no frames")
         if not loop:
             return sent, dropped
+        source_frame_index = 0
+        if progress_callback is not None:
+            progress_callback(source_frame_index)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -525,6 +576,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--loop", action="store_true", help="repeat until Ctrl-C")
     parser.add_argument(
+        "--start-frame", type=int, default=0,
+        help="zero-based output frame to resume from (default: 0)",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=0.2,
@@ -552,6 +607,7 @@ def main(
     *,
     playback_paused: Callable[[], bool] | None = None,
     connection_status: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     if args.list_ports:
@@ -566,6 +622,8 @@ def main(
         raise SystemExit("error: --port-wait cannot be negative")
     if args.retries < 0:
         raise SystemExit("error: --retries cannot be negative")
+    if args.start_frame < 0:
+        raise SystemExit("error: --start-frame cannot be negative")
     if args.buffer_seconds <= 0:
         raise SystemExit("error: --buffer-seconds must be positive")
     if args.prebuffer_seconds < 0 or args.prebuffer_seconds > args.buffer_seconds:
@@ -576,7 +634,13 @@ def main(
     connection: SerialConnection | None = None
     try:
         source = buffered_source(
-            open_video(args.video, args.fps, args.led_gamma, args.display_size),
+            open_video(
+                args.video,
+                args.fps,
+                args.led_gamma,
+                args.display_size,
+                start_frame=args.start_frame,
+            ),
             args.buffer_seconds,
             args.prebuffer_seconds,
         )
@@ -603,6 +667,8 @@ def main(
             drop_late=not args.no_drop,
             display_size=args.display_size,
             playback_paused=playback_paused,
+            source_start_frame=args.start_frame,
+            progress_callback=progress_callback,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
         return 0

@@ -3,8 +3,10 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 from urllib.request import Request, urlopen
 
+from mp4_player import stream as mp4_stream
 from mp4_player.playback_controls import PlaybackControls, PlaybackControlServer
 from mp4_player.prepare import DISPLAY_FILTER, enhance_prepared_video, prepared_path
 
@@ -76,6 +78,27 @@ class VideoPlaybackControlTests(unittest.TestCase):
         self.assertIn("0.90/0.98", DISPLAY_FILTER)
         self.assertIn("1/1", DISPLAY_FILTER)
         self.assertIn("saturation=1.18", DISPLAY_FILTER)
+
+    def test_reconnect_resumes_after_the_last_acknowledged_frame(self):
+        attempts = 0
+
+        def run(_arguments, **callbacks):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                callbacks["progress_callback"](437)
+                return 1
+            return 0
+
+        with (
+            mock.patch.object(mp4_stream.stream_arduino, "main", side_effect=run) as main,
+            mock.patch.object(mp4_stream.time, "sleep"),
+        ):
+            result = mp4_stream.stream_with_resume(["prepared.mp4"], self.controls)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(main.call_args_list[0].args[0][-2:], ["--start-frame", "0"])
+        self.assertEqual(main.call_args_list[1].args[0][-2:], ["--start-frame", "437"])
 
 
 if __name__ == "__main__":
