@@ -49,6 +49,10 @@ MIN_DBFS = -72.0
 MAX_DBFS = -6.0
 DEFAULT_SENSITIVITY = 1.5
 RAINBOW_CYCLE_SECONDS = 8.0
+RECONNECT_TIMEOUT_SECONDS = 60.0
+# Keep USB output smooth without making the Mac analyze and redraw every
+# transmitted frame. The encoded frame is reused between these updates.
+DEFAULT_RENDER_FPS = 15.0
 
 
 def amplitude_to_level(amplitude: float, sensitivity: float = 1.0) -> float:
@@ -542,19 +546,51 @@ class AudioVisualizer:
         ).clip(0, 255).astype(np.uint8)
 
 
-class RefreshRequested(Exception):
-    """Return control to the main thread so it can clean up before restarting."""
+class ReconnectRequested(Exception):
+    """Return control to the main thread so it can reset the USB connection."""
+
+
+class PanelConnectionState:
+    """Publish the serial lifecycle safely to the HTTP control thread."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._status = "connecting"
+        self._message = "Connecting to LED controller…"
+
+    def update(self, status: str, message: str) -> None:
+        with self._lock:
+            self._status = status
+            self._message = message
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"status": self._status, "message": self._message}
 
 
 def iter_audio_frames(
     capture: AudioCapture, visualizer: AudioVisualizer,
-    refresh_requested: threading.Event | None = None,
+    reconnect_requested: threading.Event | None = None,
+    *, output_fps: float = DEFAULT_STREAM_FPS,
+    render_fps: float = DEFAULT_RENDER_FPS,
 ) -> Iterator[bytes]:
+    if not np.isfinite(output_fps) or output_fps <= 0:
+        raise ValueError("output FPS must be positive")
+    if not np.isfinite(render_fps) or render_fps <= 0:
+        raise ValueError("render FPS must be positive")
+    if render_fps > output_fps:
+        raise ValueError("render FPS cannot exceed output FPS")
     visualizer._output_brightness = BrightnessEnvelope()
+    encoded: bytes | None = None
+    render_budget = output_fps
     while True:
-        if refresh_requested is not None and refresh_requested.is_set():
-            raise RefreshRequested()
-        yield encode_rgb565(visualizer.render(capture.latest(FFT_SIZE)))
+        if reconnect_requested is not None and reconnect_requested.is_set():
+            raise ReconnectRequested()
+        if encoded is None or render_budget + 1e-9 >= output_fps:
+            encoded = encode_rgb565(visualizer.render(capture.latest(FFT_SIZE)))
+            render_budget -= output_fps
+        yield encoded
+        render_budget += render_fps
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -587,7 +623,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="LED refresh rate (default: 12 with per-lane 48x48 protection)",
+        help="LED refresh rate (default: 30 with pipelined 48x48 output)",
+    )
+    parser.add_argument(
+        "--render-fps",
+        type=float,
+        default=DEFAULT_RENDER_FPS,
+        help=(
+            "maximum PC-side audio analysis and animation rate; encoded frames "
+            "are reused at the LED refresh rate (default: 15)"
+        ),
     )
     parser.add_argument(
         "--slowdown", type=float, default=DEFAULT_SLOWDOWN,
@@ -623,6 +668,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not np.isfinite(args.fps) or args.fps <= 0:
         raise SystemExit("error: --fps must be positive")
+    if not np.isfinite(args.render_fps) or args.render_fps <= 0:
+        raise SystemExit("error: --render-fps must be positive")
+    if args.render_fps > args.fps:
+        raise SystemExit("error: --render-fps cannot exceed --fps")
     if not np.isfinite(args.sensitivity) or args.sensitivity <= 0:
         raise SystemExit("error: --sensitivity must be positive")
     try:
@@ -644,8 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         slowdown=args.slowdown, size=args.display_size, settings_path=args.settings_file,
     )
     control_server: PaletteServer | None = None
-    connection: SerialConnection | None = None
-    refresh_requested = threading.Event()
+    reconnect_requested = threading.Event()
+    connection_state = PanelConnectionState()
     try:
         print(
             "Requesting access to the Mac's system audio. If prompted, allow "
@@ -658,22 +707,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         source = FrameSource(
             fps=args.fps,
-            iter_frames=lambda: iter_audio_frames(capture, visualizer, refresh_requested),
+            iter_frames=lambda: iter_audio_frames(
+                capture,
+                visualizer,
+                reconnect_requested,
+                output_fps=args.fps,
+                render_fps=args.render_fps,
+            ),
             size=visualizer.size,
         )
-        port = resolve_port(args.port, wait_timeout=args.port_wait)
-        print(f"Opening {port}...", file=sys.stderr)
-        connection = open_serial(port, args.timeout, baudrate=args.baud)
-        time.sleep(0.2)
-        connection.reset_input_buffer()
-        handshake(connection, source.fps, args.timeout, max(args.retries, 3), args.display_size)
-        print(
-            f"Listening to Mac system audio; streaming {args.style} at "
-            f"{source.fps:g} FPS. Ctrl-C stops.",
-            file=sys.stderr,
-        )
         if controls is not None:
-            control_server = PaletteServer(controls, args.controls_port, on_refresh=refresh_requested.set)
+            def request_reconnect() -> None:
+                connection_state.update("reconnecting", "Resetting USB connection…")
+                reconnect_requested.set()
+
+            control_server = PaletteServer(
+                controls,
+                args.controls_port,
+                on_reconnect=request_reconnect,
+                connection_state=connection_state.snapshot,
+            )
             control_server.start()
             print(f"Live palette controls: {control_server.url}", file=sys.stderr)
             if not args.no_browser:
@@ -681,19 +734,121 @@ def main(argv: list[str] | None = None) -> int:
                     webbrowser.open(control_server.url)
                 except webbrowser.Error:
                     print("Open the controls URL in your browser.", file=sys.stderr)
-        stream_frames(
-            connection,
-            source,
-            loop=False,
-            timeout=args.timeout,
-            retries=args.retries,
-            drop_late=False,
-            rebase_late=True,
-            display_size=args.display_size,
-        )
-        return 0
-    except RefreshRequested:
-        print("Refreshing the app...", file=sys.stderr)
+
+        requested_port = args.port
+        retrying = False
+        retry_deadline: float | None = None
+        while True:
+            connection: SerialConnection | None = None
+            reconnect_now = False
+            connection_error: OSError | RuntimeError | None = None
+            try:
+                if retrying:
+                    assert retry_deadline is not None
+                    if time.monotonic() >= retry_deadline:
+                        retrying = False
+                        retry_deadline = None
+                        connection_state.update(
+                            "disconnected",
+                            "Reconnect timed out · press Reconnect LEDs to try again",
+                        )
+                        reconnect_requested.wait()
+                        reconnect_requested.clear()
+                        requested_port = "auto"
+                        retrying = True
+                        retry_deadline = time.monotonic() + RECONNECT_TIMEOUT_SECONDS
+                    connection_state.update(
+                        "reconnecting", "Waiting up to one minute for the USB LED controller…"
+                    )
+                else:
+                    connection_state.update("connecting", "Connecting to LED controller…")
+                port = resolve_port(
+                    requested_port,
+                    wait_timeout=1.0 if retrying else args.port_wait,
+                )
+                if reconnect_requested.is_set():
+                    raise ReconnectRequested()
+                print(f"Opening {port}...", file=sys.stderr)
+                connection = open_serial(port, args.timeout, baudrate=args.baud)
+                time.sleep(0.2)
+                connection.reset_input_buffer()
+                handshake(
+                    connection, source.fps, args.timeout,
+                    max(args.retries, 3), args.display_size,
+                )
+                connection_state.update("live", f"LED controller connected on {port}")
+                retrying = False
+                print(
+                    f"Listening to Mac system audio; streaming {args.style} at "
+                    f"{source.fps:g} FPS with {args.render_fps:g} PC renders/s. "
+                    "Ctrl-C stops.",
+                    file=sys.stderr,
+                )
+                stream_frames(
+                    connection,
+                    source,
+                    loop=False,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    drop_late=False,
+                    rebase_late=True,
+                    display_size=args.display_size,
+                )
+                return 0
+            except ReconnectRequested:
+                reconnect_now = True
+            except (OSError, RuntimeError) as exc:
+                connection_error = exc
+            finally:
+                if connection is not None:
+                    if args.clear_on_exit:
+                        try:
+                            exchange_packet(
+                                connection,
+                                PACKET_CLEAR,
+                                0xFFFFFFFF,
+                                b"",
+                                STATUS_ACK,
+                                args.timeout,
+                                0,
+                            )
+                        except (OSError, RuntimeError):
+                            pass
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+
+            if reconnect_now:
+                print("Resetting the LED USB connection...", file=sys.stderr)
+                reconnect_requested.clear()
+                requested_port = "auto"
+                retrying = True
+                retry_deadline = time.monotonic() + RECONNECT_TIMEOUT_SECONDS
+                continue
+
+            assert connection_error is not None
+            if controls is None:
+                raise connection_error
+            print(f"LED connection stopped: {connection_error}", file=sys.stderr)
+            if retrying:
+                assert retry_deadline is not None
+                connection_state.update(
+                    "reconnecting", "Waiting up to one minute for the USB LED controller…"
+                )
+                remaining = max(0.0, retry_deadline - time.monotonic())
+                reconnect_requested.wait(timeout=min(1.0, remaining))
+                reconnect_requested.clear()
+                continue
+
+            connection_state.update(
+                "disconnected", "USB disconnected · press Reconnect LEDs"
+            )
+            reconnect_requested.wait()
+            reconnect_requested.clear()
+            requested_port = "auto"
+            retrying = True
+            retry_deadline = time.monotonic() + RECONNECT_TIMEOUT_SECONDS
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
         return 130
@@ -704,44 +859,6 @@ def main(argv: list[str] | None = None) -> int:
         if control_server is not None:
             control_server.close()
         capture.close()
-        if connection is not None:
-            if args.clear_on_exit:
-                try:
-                    exchange_packet(
-                        connection,
-                        PACKET_CLEAR,
-                        0xFFFFFFFF,
-                        b"",
-                        STATUS_ACK,
-                        args.timeout,
-                        0,
-                    )
-                except (OSError, RuntimeError):
-                    pass
-            connection.close()
-
-    # The old HTTP server, audio tap and serial connection are all closed.
-    # Keep the actual controls port (including --controls-port 0) so the
-    # existing browser tab reconnects; reload Python code without opening a tab.
-    assert control_server is not None
-    args.controls_port = control_server.port
-    args.no_browser = True
-    restart_args = []
-    for name, value in vars(args).items():
-        if value is None:
-            continue
-        flag = "--" + name.replace("_", "-")
-        if isinstance(value, bool):
-            if value:
-                restart_args.append(flag)
-        else:
-            restart_args.extend([flag, str(value)])
-    try:
-        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *restart_args])
-    except OSError as exc:
-        print(f"error: could not restart the app: {exc}", file=sys.stderr)
-        return 1
-    return 0
 
 
 if __name__ == "__main__":

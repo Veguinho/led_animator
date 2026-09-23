@@ -84,6 +84,19 @@ class FrameDelayerTests(unittest.TestCase):
                     main(["--slowdown", value])
                 capture.assert_not_called()
 
+    def test_invalid_or_excessive_render_rate_is_rejected_before_audio_capture(self):
+        for arguments in (
+            ["--render-fps", "0"],
+            ["--render-fps", "nan"],
+            ["--fps", "30", "--render-fps", "31"],
+        ):
+            with self.subTest(arguments=arguments), mock.patch(
+                "system_audio_visualizer.AudioCapture"
+            ) as capture:
+                with self.assertRaisesRegex(SystemExit, "render-fps"):
+                    main(arguments)
+                capture.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

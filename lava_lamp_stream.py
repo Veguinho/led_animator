@@ -260,7 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="LED refresh rate (default: 12 with per-lane 48x48 protection)",
+        help="LED refresh rate (default: 30 with pipelined 48x48 output)",
     )
     parser.add_argument(
         "--simulation-size",

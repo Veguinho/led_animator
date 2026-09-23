@@ -159,7 +159,7 @@ void command(uint8_t type, uint16_t length, uint32_t sequence) {
 
 void receivePacket() {
   static uint8_t matched = 0;
-  const uint8_t magic[] = {'P', 'V', '3', '2'};
+  const uint8_t magic[] = {'P', 'V', '4', '8'};
   while (PANEL_SERIAL.available()) {
     uint8_t byte = PANEL_SERIAL.read();
     if (byte == magic[matched]) ++matched;

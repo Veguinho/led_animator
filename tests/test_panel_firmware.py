@@ -26,7 +26,7 @@ struct CRGB {
 const CRGB CRGB::Red(255,0,0), CRGB::Green(0,255,0),
            CRGB::Blue(0,0,255), CRGB::White(255,255,255);
 namespace fl {
-enum class Bus { RMT, LCD_CLOCKLESS };
+enum class Bus { RMT, I2S, LCD_CLOCKLESS };
 struct TIMING_WS2812_800KHZ {};
 struct ChannelOptions { Bus mBus = Bus::RMT; };
 template<typename T> struct span {
@@ -38,20 +38,22 @@ template<typename TIMING> int makeClockless(int pin) { return pin; }
 struct ChannelConfig {
   int pin;
   span<CRGB> pixels;
-  ChannelConfig(int pin, span<CRGB> pixels, int, ChannelOptions): pin(pin), pixels(pixels) {}
+  Bus bus;
+  ChannelConfig(int pin, span<CRGB> pixels, int, ChannelOptions options):
+      pin(pin), pixels(pixels), bus(options.mBus) {}
 };
 }
 struct FakeLED {
-  struct Lane { int pin; CRGB *data; int length; std::vector<CRGB> snapshot; };
+  struct Lane { int pin; CRGB *data; int length; fl::Bus bus; std::vector<CRGB> snapshot; };
   std::vector<Lane> lanes;
   bool inFlight = false;
   int shows = 0, brightness = 255, dither = 1;
   template<int CHIPSET, int PIN, int ORDER> void addLeds(CRGB *data, int count) {
-    lanes.push_back({PIN, data, count, {}});
+    lanes.push_back({PIN, data, count, fl::Bus::RMT, {}});
   }
   template<fl::Bus BUS> void setExclusiveDriver() {}
   void add(const fl::ChannelConfig &config) {
-    lanes.push_back({config.pin, config.pixels.data, int(config.pixels.size), {}});
+    lanes.push_back({config.pin, config.pixels.data, int(config.pixels.size), config.bus, {}});
   }
   void setBrightness(int value) { brightness = value; }
   void setDither(int value) { dither = value; }
@@ -68,7 +70,7 @@ struct FakeLED {
     assert(brightness == 255 && dither == 0);
     for (auto &lane : lanes) for (int i=0; i<lane.length; ++i) {
       const auto &color = lane.data[i];
-      assert(int(color.r) + color.g + color.b <= 18);
+      assert(int(color.r) + color.g + color.b <= 255);
     }
     for (auto &lane : lanes)
       lane.snapshot.assign(lane.data, lane.data + lane.length);
@@ -86,6 +88,7 @@ struct FakeSerial {
   std::vector<uint8_t> incoming, outgoing;
   size_t cursor = 0, rxSize = 0;
   bool receivedDuringDMA = false;
+  int showsAtResponse = -1;
   void setRxBufferSize(size_t size) { rxSize = size; }
   void begin(uint32_t baud) { assert(baud == 2000000); }
   void setTimeout(int) {}
@@ -99,6 +102,7 @@ struct FakeSerial {
     return count;
   }
   void write(const uint8_t *data, size_t size) {
+    if (outgoing.empty()) showsAtResponse = FastLED.shows;
     outgoing.insert(outgoing.end(), data, data + size);
   }
 } Serial0;
@@ -123,10 +127,10 @@ void request(uint8_t type, uint32_t sequence, std::vector<uint8_t> payload,
   Serial0.incoming = packet;
   Serial0.cursor = 0;
   Serial0.outgoing.clear();
+  Serial0.showsAtResponse = -1;
   loop();
 }
 void response(uint8_t status, uint16_t detail, uint32_t sequence) {
-  assert(!FastLED.inFlight);  // Every protocol response follows a completed transfer.
   assert(Serial0.outgoing.size() == 12);
   assert(memcmp(Serial0.outgoing.data(), "LEDR", 4) == 0);
   assert(Serial0.outgoing[5] == status);
@@ -173,6 +177,7 @@ int main() {
     assert(FastLED.lanes[panel].pin == expectedPins[panel]);
     assert(FastLED.lanes[panel].data == leds+panel*256);
     assert(FastLED.lanes[panel].length == 256);
+    assert(FastLED.lanes[panel].bus == fl::Bus::RMT);
   }
   std::vector<uint8_t> frame(4608, 0);
   request(PACKET_FRAME, 1, frame);
@@ -184,20 +189,25 @@ int main() {
   request(PACKET_HELLO, 0, {48,48,1,0,0,0,0,0});
   response(STATUS_READY, 0, 0);
 
-  // Different colors across a panel boundary; the transfer must finish before ACK.
+  // Different colors across a panel boundary. ACK is immediate so reception
+  // of the next packet can overlap this hardware-timed transfer.
   writeU16(frame.data()+15*2, 0xf800);
   writeU16(frame.data()+16*2, 0x07e0);
   writeU16(frame.data()+(16*48)*2, 0x001f);
   writeU16(frame.data()+(16*48+16)*2, 0xffff);
+  const int showsBeforeFrame = FastLED.shows;
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
-  assert(!FastLED.inFlight);
-  assert(leds[255].r == 18 && leds[256].g == 18);
-  assert(leds[768].b == 18);
-  assert(leds[1024].r == 5 && leds[1024].g == 5 && leds[1024].b == 5);
+  assert(Serial0.showsAtResponse == showsBeforeFrame);
+  assert(FastLED.shows == showsBeforeFrame + 1);
+  assert(FastLED.inFlight);
+  assert(leds[255].r == 255 && leds[256].g == 255);
+  assert(leds[768].b == 255);
+  assert(leds[1024].r == 85 && leds[1024].g == 85 && leds[1024].b == 85);
   const int shows = FastLED.shows;
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
+  assert(FastLED.inFlight);
   assert(FastLED.shows == shows);
 
   request(PACKET_FRAME, 2, frame, true);
@@ -210,8 +220,8 @@ int main() {
   writeU16(frame.data()+15*2, 0x001f);
   request(PACKET_FRAME, 2, frame);
   response(STATUS_ACK, 0, 2);
-  assert(!Serial0.receivedDuringDMA && !FastLED.inFlight);
-  assert(leds[255].b == 18 && leds[255].r == 0);
+  assert(Serial0.receivedDuringDMA && FastLED.inFlight);
+  assert(leds[255].b == 255 && leds[255].r == 0);
 
   request(PACKET_CLEAR, 99, {});
   response(STATUS_ACK, 0, 99);
@@ -219,13 +229,13 @@ int main() {
   for (auto &led : leds) assert(led.r == 0 && led.g == 0 && led.b == 0);
   request(PACKET_FRAME, 2, frame);  // Same sequence can redraw after CLEAR.
   response(STATUS_ACK, 0, 2);
-  assert(!FastLED.inFlight && leds[255].b == 18);
+  assert(FastLED.inFlight && leds[255].b == 255);
   // A full-white packet cannot bypass limits, even if global settings changed.
   FastLED.setBrightness(255);
   FastLED.setDither(1);
   request(PACKET_FRAME, 3, std::vector<uint8_t>(4608, 255));
   response(STATUS_ACK, 0, 3);
-  for (const auto &color : leds) assert(color.r == 5 && color.g == 5 && color.b == 5);
+  for (const auto &color : leds) assert(color.r == 85 && color.g == 85 && color.b == 85);
   showMatrixCoverageTest();  // The startup diagnostic uses the same limiter.
   FastLED.wait();
 }
@@ -240,11 +250,11 @@ class PanelFirmwareTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(shutil.which("c++"), "a C++ compiler is required")
-    def test_mapping_protocol_and_completed_transfers(self):
+    def test_mapping_protocol_and_pipelined_transfers(self):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             (temp / "FastLED.h").write_text(FASTLED_STUB)
-            bus_traits = temp / "platforms/esp/32/drivers/lcd_spi/bus_traits.h"
+            bus_traits = temp / "platforms/esp/32/drivers/rmt/rmt_5/bus_traits.h"
             bus_traits.parent.mkdir(parents=True)
             bus_traits.write_text("#pragma once\n")
             (temp / "test.cpp").write_text(HARNESS)

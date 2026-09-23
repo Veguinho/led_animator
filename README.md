@@ -1,41 +1,42 @@
 # 💡 LED Animator
 
-Live lava, audio-reactive waves, and video playback on a **32×32 RGB LED
-screen** built from four 16×16 panels. Python creates the frames; an ESP32-S3
-drives IO10–IO13 independently and receives frames through the existing CH340 USB
-connection. Full 32×32 streaming defaults to 20 FPS on this hardware.
-Live audio uses four RMT outputs and waits for each frame to finish before
-acknowledging it; preloaded video retains its separate LCD_CAM driver.
+Live lava, audio-reactive waves, and video playback on a **48×48 RGB LED
+screen** built from nine 16×16 panels. Python creates the frames; an ESP32-S3
+drives nine hardware-timed RMT outputs and receives frames through the existing CH340 USB
+connection. Full 48×48 streaming defaults to 30 FPS on this hardware.
+Live audio overlaps UART reception with hardware-timed LED output.
 Viewed from the front, the panel layout is:
 
 ```text
-IO11  IO10
-IO13  IO12
+IO11  IO10  IO09
+IO13  IO12  IO20
+IO46  IO17  IO18
 ```
 
-The images on the two left panels (IO11 and IO13) are mirrored horizontally.
+All nine panels use the same clockwise rotation and horizontal mirror correction.
 
-Live audio starts in dim red at the tested 16/255 level (about 6.3%), with
-manual brightness control, softened frame changes and the normal firmware brightness ceiling of 72/255.
-The previews below show the original 16×16 effects. See the
-[native 32×32 spectrum preview](docs/32x32-preview.md) for the current logical
-screen and four-panel mapping; lava still scales its 16×16 artwork to fill the screen.
+Live audio starts in red at 50% software brightness, with
+manual brightness control, softened frame changes and a 2 A whole-panel firmware power ceiling.
+The previews below show the original 16×16 effects. The
+[32×32 spectrum preview](docs/32x32-preview.md) documents the previous
+four-panel layout; current live frames scale to fill the 48×48 screen.
 
 [32×32 preview](docs/32x32-preview.md) · [Quick start](#quick-start) · [Hardware](docs/hardware.md) ·
 [Live streaming](docs/live-streaming.md) · [Video conversion](docs/video-conversion.md)
 
 Choose live audio or locally buffered video with `python main.py`.
-[Preloaded video mode](preloaded_video/README.md) uploads a short clip into
-the board's PSRAM, then plays at 30 FPS by default without streaming each frame
-over USB. Video defaults to 25% pixel intensity and 180 ms of temporal smoothing.
-Its buffer holds up to about 102 seconds at 30 FPS. Switching modes
+The [rolling-buffer MP4 player](mp4_player/README.md) pre-renders a color- and
+contrast-enhanced 48×48 cache once, then streams it at a stable 6 FPS through a
+bounded three-second queue. It never loads the whole file, so long videos use
+approximately constant RAM. Its local app page contains only Play and Pause.
+Switching modes
 installs the corresponding firmware.
 Video loading now uses a tested **2,000,000-baud** connection (about 129 KB/s
 of measured payload throughput); firmware flashing remains at 115200 baud.
 
 ```bash
 python main.py audio
-python main.py video video_clips/clip.mp4 --seconds 10
+python main.py mp4 video_clips/clip.mp4 --seconds 10
 ```
 
 ## See it in motion
@@ -84,6 +85,7 @@ silent. The lava is a seeded fluid simulation.
 | Lava lamp | Procedural fluid simulation | `python3 lava_lamp_stream.py --clear-on-exit` |
 | Audio wave | macOS system audio | `python3 system_audio_visualizer.py --style wave --clear-on-exit` |
 | Audio spectrum | macOS system audio | `python3 system_audio_visualizer.py --style spectrum --clear-on-exit` |
+| Buffered MP4 player | Local MP4 blended to 48×48 | `python3 main.py mp4 video_clips/my_video.mp4` |
 | Video stream | Local video decoded with FFmpeg | `python3 stream_arduino.py video_clips/my_video.mp4 --loop --clear-on-exit` |
 | Video conversion | Local video | `python3 led_animator.py video_clips/my_video.mp4 -o output/my_animation` |
 
@@ -101,7 +103,7 @@ python3 -m pip install -r requirements.txt
 ```
 
 For physical playback, follow the [wiring and firmware setup](docs/hardware.md)
-for an ESP32-S3 and four 16×16 WS2812B panels with external 5 V power and
+for an ESP32-S3 and nine 16×16 WS2812B panels with external 5 V power and
 common ground. Connect the controller's existing USB port. After installing
 the firmware prerequisites, upload and start the audio wave:
 
@@ -126,7 +128,7 @@ No panel is needed to [convert videos](docs/video-conversion.md) or
 ## Documentation
 
 - [Hardware and firmware](docs/hardware.md): wiring, power, board setup, upload.
-- [32×32 mode preview](docs/32x32-preview.md): native spectrum rendering and panel mapping.
+- [32×32 mode preview](docs/32x32-preview.md): historical four-panel rendering and mapping.
 - [Live streaming](docs/live-streaming.md): lava, wave, spectrum, video, and troubleshooting.
 - [Video conversion](docs/video-conversion.md): 16×16 and 48×48 workflows, Docker, data formats, Arduino export.
 - [Development](docs/development.md): tests, project structure, and preview generation.

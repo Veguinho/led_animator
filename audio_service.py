@@ -55,7 +55,7 @@ def start(port: str = "auto") -> None:
         "Label": LABEL,
         "ProgramArguments": [
             str(ROOT / ".venv/bin/python"), str(ROOT / "system_audio_visualizer.py"),
-            "--style", "spectrum", "--display-size", "32", "--fps", "20",
+            "--style", "spectrum", "--display-size", "48", "--fps", "30",
             "--port", port, "--clear-on-exit", "--no-browser",
             "--settings-file", str(logs / "audio-palette.json"),
         ],

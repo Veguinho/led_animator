@@ -26,7 +26,7 @@ class FakeBoard:
     def write(self, packet):
         magic, version, kind, length, sequence, crc = player.HEADER.unpack(packet[:16])
         payload = packet[16:]
-        assert magic == b"PV32" and version == 1
+        assert magic == b"PV48" and version == 1
         assert len(payload) == length and zlib.crc32(payload) == crc
         self.commands.append(kind)
         value = 0
@@ -166,6 +166,12 @@ class PreloadedVideoTests(unittest.TestCase):
         ):
             self.assertEqual(launcher.main([]), 0)
         self.assertEqual(call.call_args.args[0][-1], "my clip.mp4")
+        self.assertIn("mp4_player/stream.py", call.call_args.args[0][-2])
+
+    def test_mp4_mode_dispatches_to_its_own_folder(self):
+        with mock.patch.object(launcher.subprocess, "call", return_value=0) as call:
+            self.assertEqual(launcher.main(["mp4", "clip.mp4"]), 0)
+        self.assertIn("mp4_player/stream.py", call.call_args.args[0][1])
 
     def test_audio_mode_flashes_audio_and_forwards_options(self):
         with (

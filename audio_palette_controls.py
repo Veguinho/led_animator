@@ -19,7 +19,7 @@ import numpy as np
 PRESETS = {
     "rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
     "moving-rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
-    "adaptive": ["#ff3300", "#ffbb00", "#93dfff", "#859cff"],
+    "adaptive": ["#ff3300", "#ffbb00", "#00e676", "#93dfff", "#859cff"],
     "blue-red": ["#0d1eb8", "#b800ff", "#ff0000"],
     "sunset": ["#ffbe0b", "#ff5400", "#ff006e", "#8338ec"],
     "ocean": ["#052c80", "#0077ff", "#00e5ff", "#80ffdb"],
@@ -28,12 +28,13 @@ PRESETS = {
 }
 
 DEFAULT_SLOWDOWN = 20.0
+DEFAULT_BRIGHTNESS = 0.5
 
 
 def default_settings() -> dict:
     return {
         "preset": "custom", "colors": ["#ff0000"],
-        "blend": "gradient", "brightness": 16 / 255, "saturation": 1.0,
+        "blend": "gradient", "brightness": DEFAULT_BRIGHTNESS, "saturation": 1.0,
         "reverse": False, "slowdown": DEFAULT_SLOWDOWN,
     }
 
@@ -121,8 +122,9 @@ def make_adaptive_palette(
     cool = ocean_hsv[:, 0] - 1.0
     warm = np.linspace(-0.04, 0.14, size)
     # Most of the energetic palette is pink, red, orange, and gold, with
-    # violet/cyan accents for variety. Unwrapped hues cross red smoothly.
-    vivid = np.interp(positions, [0, .2, .4, .6, .8, 1], [-.12, 0, .14, .04, -.12, -.45])
+    # violet, cyan, and green accents for variety. Unwrapped hues cross red
+    # smoothly and take the shortest route through the cooler accent colors.
+    vivid = np.interp(positions, [0, .2, .4, .6, .8, 1], [-.12, 0, .14, .04, -.12, -.75])
     hot = warm * (1.0 - colorful) + vivid * colorful
     hues = cool * (1.0 - energy) + hot * energy
     saturation = ocean_hsv[:, 1] * 0.6 * (1.0 - energy) + energy
@@ -194,13 +196,22 @@ class PaletteControls:
 class PaletteServer:
     def __init__(
         self, controls: PaletteControls, port: int = 8765,
-        on_refresh: Callable[[], None] | None = None,
+        on_reconnect: Callable[[], None] | None = None,
+        connection_state: Callable[[], dict] | None = None,
     ) -> None:
         page = Path(__file__).with_name("audio_palette_controls.html").read_bytes()
         session = uuid.uuid4().hex
 
         def state() -> dict:
-            return controls.state() | {"session": session, "refresh_available": on_refresh is not None}
+            connection = (
+                connection_state() if connection_state is not None
+                else {"status": "preview", "message": "Preview mode"}
+            )
+            return controls.state() | {
+                "session": session,
+                "reconnect_available": on_reconnect is not None,
+                "connection": connection,
+            }
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:
@@ -227,7 +238,7 @@ class PaletteServer:
                     self.json_response(404, {"error": "not found"})
 
             def do_POST(self) -> None:
-                if self.path not in ("/api/palette", "/api/refresh"):
+                if self.path not in ("/api/palette", "/api/reconnect"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
@@ -243,9 +254,9 @@ class PaletteServer:
                     if not 0 < length <= 4096:
                         raise ValueError("invalid request size")
                     payload = json.loads(self.rfile.read(length))
-                    if self.path == "/api/refresh":
+                    if self.path == "/api/reconnect":
                         if payload != {}:
-                            raise ValueError("refresh expects an empty JSON object")
+                            raise ValueError("reconnect expects an empty JSON object")
                     else:
                         controls.update(payload)
                 except (ValueError, UnicodeError) as exc:
@@ -254,13 +265,13 @@ class PaletteServer:
                 except OSError:
                     self.json_response(500, {"error": "could not save palette settings"})
                     return
-                if self.path == "/api/refresh":
-                    if on_refresh is None:
-                        self.json_response(503, {"error": "refresh is unavailable in this preview"})
+                if self.path == "/api/reconnect":
+                    if on_reconnect is None:
+                        self.json_response(503, {"error": "reconnect is unavailable in this preview"})
                         return
-                    self.json_response(202, {"restarting": True, "session": session})
+                    self.json_response(202, {"reconnecting": True, "session": session})
                     self.wfile.flush()
-                    on_refresh()
+                    on_reconnect()
                     return
                 self.json_response(200, state())
 

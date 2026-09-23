@@ -1,17 +1,16 @@
 #include <FastLED.h>
-#include "platforms/esp/32/drivers/lcd_spi/bus_traits.h"
+#include "platforms/esp/32/drivers/rmt/rmt_5/bus_traits.h"
 #include "panel_layout.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S3)
 #error "This sketch requires an ESP32-S3."
 #endif
 
-// Bake the old 72/255 global brightness into every pixel byte before it reaches
-// any output lane. Keep the driver at 255 so all nine GPIOs transmit the same
-// already-limited values, including the top-right panel on GPIO9.
-constexpr uint8_t OUTPUT_SCALE = 72;
+// Preserve source luminance contrast before FastLED applies the whole-panel
+// power budget. Sparse highlights can now be bright while black remains off.
+constexpr uint8_t OUTPUT_SCALE = 255;
 constexpr uint8_t DRIVER_BRIGHTNESS = 255;
-constexpr uint16_t MAX_PIXEL_RGB_TOTAL = 64;
+constexpr uint16_t MAX_PIXEL_RGB_TOTAL = 255;
 constexpr uint16_t MAX_TRANSMITTED_RGB_TOTAL =
     MAX_PIXEL_RGB_TOTAL * OUTPUT_SCALE / 255;
 
@@ -115,6 +114,7 @@ CRGB limitPixelBrightness(CRGB color) {
 }
 
 void showLimitedFrame() {
+  // The previous frame must release `leds` before this one is prepared.
   FastLED.wait();
   for (uint16_t index = 0; index < NUM_LEDS; ++index) {
     leds[index] = limitPixelBrightness(leds[index]);
@@ -123,7 +123,8 @@ void showLimitedFrame() {
   FastLED.setBrightness(DRIVER_BRIGHTNESS);
   FastLED.setDither(0);
   FastLED.show();
-  FastLED.wait();
+  // RMT now owns `leds`. Return so UART can receive the next packet while the
+  // hardware-timed transfer runs; drawFrame() waits before changing it.
 }
 
 void showMatrixCoverageTest() {
@@ -186,7 +187,8 @@ void drawFrame(const uint8_t *payload) {
     const uint8_t column = logicalIndex % WIDTH;
     leds[physicalIndex(row, column)] = decodeRgb565(color);
   }
-  // Finish the limited LED transfer before ACK permits another frame.
+  // Start the limited LED transfer. Its ACK lets the host send the next
+  // packet while RMT is busy; that packet is received into packetPayload.
   showLimitedFrame();
 }
 
@@ -215,9 +217,15 @@ void handlePacket(uint8_t type, uint16_t length, uint32_t sequence) {
     }
     // If an ACK was lost, acknowledge the retry without drawing it twice.
     if (!hasLastFrame || sequence != lastFrameSequence) {
-      drawFrame(packetPayload);
       lastFrameSequence = sequence;
       hasLastFrame = true;
+      // Acknowledge the complete, CRC-verified receive buffer before mapping
+      // and submitting it. UART hardware can then receive the next frame while
+      // RMT drives the LED lanes. packetPayload remains safe:
+      // receivePacket() cannot reuse it until drawFrame() returns.
+      sendResponse(STATUS_ACK, 0, sequence);
+      drawFrame(packetPayload);
+      return;
     }
     sendResponse(STATUS_ACK, 0, sequence);
     return;
@@ -280,14 +288,15 @@ void setup() {
   // Allow margin for USB packet gaps and incomplete frames.
   PANEL_SERIAL.setTimeout(500);
 
-  // Use the ESP32-S3 parallel LCD_CAM channel driver. Runtime channel
-  // configuration is also required because GPIO20 is valid for this
-  // CH340/UART board but intentionally blocked by FastLED's compile-time API
-  // as the native USB D+ pin.
-  static_assert(PANEL_COUNT == 9, "This firmware configures nine panel outputs.");
-  FastLED.setExclusiveDriver<fl::Bus::LCD_CLOCKLESS>();
+  // Use the visually stable hardware RMT backend. Acknowledge each verified
+  // frame before drawing it so UART reception can overlap the LED transfer.
+  // Runtime channel configuration is required because GPIO20 is valid
+  // for this CH340/UART board but blocked by FastLED's compile-time pin API as
+  // the native USB D+ pin.
+  static_assert(PANEL_COUNT == 9, "This firmware configures nine RMT outputs.");
+  FastLED.setExclusiveDriver<fl::Bus::RMT>();
   fl::ChannelOptions options;
-  options.mBus = fl::Bus::LCD_CLOCKLESS;
+  options.mBus = fl::Bus::RMT;
   for (uint8_t panel = 0; panel < PANEL_COUNT; ++panel) {
     FastLED.add(fl::ChannelConfig(
         fl::makeClockless<fl::TIMING_WS2812_800KHZ>(DATA_PINS[panel]),

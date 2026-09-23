@@ -125,6 +125,33 @@ class StreamingProtocolTests(unittest.TestCase):
         self.assertEqual(result, (1, 0))
         self.assertEqual(len(exchange.call_args.args[3]), 4608)
 
+    def test_bounded_buffer_preserves_frame_order_without_loading_whole_video(self):
+        produced = []
+
+        def frames():
+            for index in range(20):
+                produced.append(index)
+                yield bytes([index])
+
+        source = stream_arduino.FrameSource(10, frames, size=48)
+        buffered = stream_arduino.buffered_source(
+            source, buffer_seconds=0.5, prebuffer_seconds=0.3
+        )
+        iterator = buffered.iter_frames()
+        first = next(iterator)
+        self.assertEqual(first, bytes([0]))
+        # The producer can be one frame past the five-slot queue because it may
+        # already hold the next yielded object, but it cannot decode the file.
+        self.assertLessEqual(len(produced), 7)
+        self.assertEqual([first, *iterator], [bytes([i]) for i in range(20)])
+
+    def test_bounded_buffer_validates_window_sizes(self):
+        source = stream_arduino.FrameSource(30, lambda: iter(()), size=48)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            stream_arduino.buffered_source(source, 0, 0)
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            stream_arduino.buffered_source(source, 1, 2)
+
     def test_32_pixel_handshake(self):
         connection = mock.Mock()
         with mock.patch.object(stream_arduino, "exchange_packet") as exchange:

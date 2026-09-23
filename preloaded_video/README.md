@@ -1,5 +1,10 @@
 # Preloaded video mode
 
+> Compatibility note: the active 48×48 mode now lives in
+> [`mp4_player/`](../mp4_player/README.md). Use `python main.py mp4 VIDEO`.
+> This document retains historical implementation notes for the older package
+> name and may describe the previous 32×32 panel layout.
+
 This mode uploads a short video through the existing CH340 USB socket, then
 plays it from ESP32-S3 PSRAM. Serial bandwidth affects the initial upload,
 but does not set the local playback rate. Playback defaults to **30 FPS** on

@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import math
+import queue
 import struct
 import sys
+import threading
 import time
 import zlib
 from collections.abc import Callable, Iterator
@@ -30,8 +33,8 @@ HEIGHT = 16
 FRAME_BYTES = WIDTH * HEIGHT * 2
 DEFAULT_DISPLAY_SIZE = 48
 SERIAL_BAUD = 2_000_000
-# Leave room for decoding and parallel LED submission as well as UART traffic.
-DEFAULT_STREAM_FPS = 12.0
+# UART reception overlaps the ESP32's hardware-timed LED transmission.
+DEFAULT_STREAM_FPS = 30.0
 DEFAULT_PORT_WAIT = 30.0
 
 # Common USB serial names on macOS, Linux, and boards using WCH or Silicon Labs
@@ -85,6 +88,14 @@ class DeviceResponse:
     status: int
     detail: int
     sequence: int
+
+
+@dataclass(frozen=True)
+class _ProducerFailure:
+    error: BaseException
+
+
+_BUFFER_END = object()
 
 
 def build_packet(packet_type: int, sequence: int, payload: bytes = b"") -> bytes:
@@ -214,6 +225,59 @@ def open_video(
     )
 
 
+def buffered_source(
+    source: FrameSource,
+    buffer_seconds: float,
+    prebuffer_seconds: float,
+) -> FrameSource:
+    """Decode into a bounded queue so short host stalls do not pause playback."""
+    if not np.isfinite(buffer_seconds) or buffer_seconds <= 0:
+        raise ValueError("buffer seconds must be positive")
+    if not np.isfinite(prebuffer_seconds) or prebuffer_seconds < 0:
+        raise ValueError("prebuffer seconds cannot be negative")
+    if prebuffer_seconds > buffer_seconds:
+        raise ValueError("prebuffer seconds cannot exceed buffer seconds")
+    capacity = max(1, math.ceil(source.fps * buffer_seconds))
+    prebuffer = min(capacity, math.ceil(source.fps * prebuffer_seconds))
+
+    def iter_frames() -> Iterator[bytes]:
+        pending: queue.Queue[bytes | _ProducerFailure | object] = queue.Queue(capacity)
+        ready = threading.Event()
+
+        def produce() -> None:
+            try:
+                for frame in source.iter_frames():
+                    pending.put(frame)
+                    if pending.qsize() >= prebuffer:
+                        ready.set()
+            except BaseException as exc:
+                pending.put(_ProducerFailure(exc))
+            finally:
+                pending.put(_BUFFER_END)
+                ready.set()
+
+        worker = threading.Thread(target=produce, name="mp4-frame-decoder", daemon=True)
+        worker.start()
+        ready.wait()
+        buffered = min(pending.qsize(), capacity)
+        print(
+            f"Frame buffer ready: {buffered}/{capacity} frames "
+            f"({buffered / source.fps:.2f} s).",
+            file=sys.stderr,
+            flush=True,
+        )
+        while True:
+            item = pending.get()
+            if item is _BUFFER_END:
+                return
+            if isinstance(item, _ProducerFailure):
+                raise item.error
+            assert isinstance(item, bytes)
+            yield item
+
+    return FrameSource(fps=source.fps, iter_frames=iter_frames, size=source.size)
+
+
 def list_serial_ports() -> list[str]:
     try:
         from serial.tools import list_ports
@@ -338,6 +402,7 @@ def stream_frames(
     drop_late: bool,
     rebase_late: bool = False,
     display_size: int = 16,
+    playback_paused: Callable[[], bool] | None = None,
 ) -> tuple[int, int]:
     if drop_late and rebase_late:
         raise ValueError("drop_late and rebase_late cannot both be enabled")
@@ -355,6 +420,14 @@ def stream_frames(
         for payload in source.iter_frames():
             payload = resize_rgb565(payload, source.size, display_size)
             frames_this_pass += 1
+            resumed = False
+            while playback_paused is not None and playback_paused():
+                resumed = True
+                time.sleep(0.05)
+            if resumed and pass_start is not None:
+                # Paused time is not part of the video timeline. Rebase so
+                # resume sends the held next frame instead of dropping ahead.
+                pass_start = time.monotonic() - (frames_this_pass - 1) / source.fps
             if pass_start is None:
                 # Start the clock after FFmpeg produces its first frame, so
                 # process startup never causes the beginning of a clip to drop.
@@ -431,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         type=float,
         default=DEFAULT_STREAM_FPS,
-        help="maximum streaming FPS (default: 12 with per-lane 48x48 protection)",
+        help="maximum streaming FPS (default: 30 with pipelined 48x48 output)",
     )
     parser.add_argument(
         "--led-gamma",
@@ -441,6 +514,14 @@ def build_parser() -> argparse.ArgumentParser:
             "LED intensity curve; higher values make dark pixels dimmer "
             "(default: 2.2)"
         ),
+    )
+    parser.add_argument(
+        "--buffer-seconds", type=float, default=3.0,
+        help="bounded decoded-frame buffer in seconds (default: 3)",
+    )
+    parser.add_argument(
+        "--prebuffer-seconds", type=float, default=1.0,
+        help="frames to prepare before playback begins (default: 1)",
     )
     parser.add_argument("--loop", action="store_true", help="repeat until Ctrl-C")
     parser.add_argument(
@@ -466,7 +547,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    playback_paused: Callable[[], bool] | None = None,
+    connection_status: Callable[[str], None] | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     if args.list_ports:
         for port in list_serial_ports():
@@ -480,10 +566,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --port-wait cannot be negative")
     if args.retries < 0:
         raise SystemExit("error: --retries cannot be negative")
+    if args.buffer_seconds <= 0:
+        raise SystemExit("error: --buffer-seconds must be positive")
+    if args.prebuffer_seconds < 0 or args.prebuffer_seconds > args.buffer_seconds:
+        raise SystemExit(
+            "error: --prebuffer-seconds must be non-negative and no larger than the buffer"
+        )
 
     connection: SerialConnection | None = None
     try:
-        source = open_video(args.video, args.fps, args.led_gamma, args.display_size)
+        source = buffered_source(
+            open_video(args.video, args.fps, args.led_gamma, args.display_size),
+            args.buffer_seconds,
+            args.prebuffer_seconds,
+        )
         port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port} for {args.display_size}×{args.display_size} frames...", file=sys.stderr)
         connection = open_serial(port, args.timeout, baudrate=args.baud)
@@ -492,6 +588,8 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(0.2)
         connection.reset_input_buffer()
         handshake(connection, source.fps, args.timeout, max(args.retries, 3), args.display_size)
+        if connection_status is not None:
+            connection_status("live")
         print(
             f"Converting and streaming at {source.fps:.3f} FPS. Ctrl-C stops.",
             file=sys.stderr,
@@ -504,6 +602,7 @@ def main(argv: list[str] | None = None) -> int:
             retries=args.retries,
             drop_late=not args.no_drop,
             display_size=args.display_size,
+            playback_paused=playback_paused,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
         return 0
@@ -511,6 +610,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nStopped.", file=sys.stderr)
         return 130
     except (OSError, RuntimeError, ValueError) as exc:
+        if connection_status is not None:
+            connection_status("reconnecting")
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:

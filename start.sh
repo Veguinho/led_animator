@@ -110,7 +110,7 @@ fi
 echo "Starting the live spectrum on $port..." >&2
 exec "$project_python" "$PROJECT_DIR/system_audio_visualizer.py" \
   --display-size 48 \
-  --fps 12 \
+  --fps 30 \
   --port "$port" \
   --clear-on-exit \
   "${visualizer_args[@]}"

@@ -341,8 +341,8 @@
         <div class="header-actions">
           <div id="status" class="status" role="status" aria-live="polite">Connecting…</div>
           <button id="refresh" type="button" class="small" disabled
-            title="Restart the visualizer and reload this page. Settings reset to defaults.">
-            ↻ Refresh app
+            title="Close the current USB connection and keep retrying until the LED controller reconnects.">
+            ↻ Reconnect LEDs
           </button>
         </div>
       </header>
@@ -391,7 +391,7 @@
             <label for="brightness" class="range-label"
               >Brightness
               <output id="brightness-value" for="brightness"
-                >6.3%</output
+                >50%</output
               ></label
             ><input
               id="brightness"
@@ -399,7 +399,7 @@
               min="0"
               max="100"
               step="0.1"
-              value="6.3"
+              value="50"
             />
             <label for="saturation" class="range-label"
               >Saturation
@@ -467,8 +467,8 @@
         revision = -1,
         pending = null,
         sending = false,
-        refreshing = false,
-        refreshError = null,
+        reconnecting = false,
+        reconnectError = null,
         editVersion = 0;
       const context = $("preview").getContext("2d");
       function status(message, state = "live") {
@@ -619,7 +619,7 @@
         flush();
       }
       async function flush() {
-        if (refreshing || sending || !pending) return;
+        if (reconnecting || sending || !pending) return;
         sending = true;
         const next = pending;
         pending = null;
@@ -629,12 +629,12 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(next),
           });
-          if (refreshing) { sending = false; return; }
+          if (reconnecting) { sending = false; return; }
           revision = data.revision;
           draw(data);
           if (!pending) status("● Live · controls synced");
         } catch (error) {
-          if (refreshing) { sending = false; return; }
+          if (reconnecting) { sending = false; return; }
           // Keep the latest edit for the next poll to retry after reconnection.
           if (!pending) pending = next;
           status("Disconnected · retrying changes", "error");
@@ -693,7 +693,7 @@
           preset: "custom",
           colors: ["#ff0000"],
           blend: "gradient",
-          brightness: 16 / 255,
+          brightness: 0.5,
           saturation: 1,
           reverse: false,
           slowdown: 20,
@@ -702,50 +702,66 @@
         queueUpdate();
       });
       $("refresh").addEventListener("click", async () => {
-        if (refreshing) return;
-        refreshing = true;
-        refreshError = null;
-        pending = null;
+        if (reconnecting) return;
+        reconnecting = true;
+        reconnectError = null;
         $("controls").disabled = true;
         $("refresh").disabled = true;
-        $("refresh").textContent = "Refreshing…";
-        status("Restarting visualizer…", "pending");
+        $("refresh").textContent = "Retrying…";
+        status("Resetting USB connection…", "pending");
         try {
-          const previous = await request("/api/refresh", {
+          await request("/api/reconnect", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: "{}",
           });
-          const deadline = Date.now() + 45000;
-          while (Date.now() < deadline) {
+          while (true) {
             await new Promise(resolve => setTimeout(resolve, 500));
-            let current;
-            try { current = await request("/api/state"); } catch { continue; }
-            if (current.session && current.session !== previous.session) {
-              window.location.reload();
+            const current = await request("/api/state");
+            const connection = current.connection || {};
+            status(
+              connection.message || "Waiting for LED controller…",
+              connection.status === "disconnected" ? "error" : "pending",
+            );
+            if (connection.status === "live") {
+              reconnecting = false;
+              sending = false;
+              $("controls").disabled = false;
+              $("refresh").disabled = !current.reconnect_available;
+              $("refresh").textContent = "↻ Reconnect LEDs";
+              draw(current);
+              status("● Live · controls synced");
+              if (pending) flush();
+              return;
+            }
+            if (connection.status === "disconnected") {
+              reconnecting = false;
+              sending = false;
+              $("controls").disabled = false;
+              $("refresh").disabled = !current.reconnect_available;
+              $("refresh").textContent = "↻ Reconnect LEDs";
               return;
             }
           }
-          throw new Error("Could not reconnect. Relaunch the app from the Dock.");
         } catch (error) {
-          refreshing = false;
+          reconnecting = false;
           sending = false;
-          refreshError = error.message;
+          reconnectError = error.message;
           $("refresh").disabled = false;
-          $("refresh").textContent = "↻ Refresh app";
+          $("refresh").textContent = "↻ Reconnect LEDs";
           status(error.message, "error");
         }
       });
       async function poll() {
-        if (refreshing) {
+        if (reconnecting) {
           setTimeout(poll, 250);
           return;
         }
         const version = editVersion;
         try {
           const data = await request("/api/state");
-          if (refreshing) { setTimeout(poll, 250); return; }
-          $("refresh").disabled = !data.refresh_available;
+          if (reconnecting) { setTimeout(poll, 250); return; }
+          $("refresh").disabled = !data.reconnect_available;
           $("controls").disabled = false;
           if (!settings) {
             presets = data.presets;
@@ -761,8 +777,13 @@
               renderSettings();
             }
             draw(data);
-            if (refreshError) status(refreshError, "error");
-            else status("● Live · controls synced");
+            const connection = data.connection || {};
+            if (reconnectError) status(reconnectError, "error");
+            else if (connection.status === "live") status("● Live · controls synced");
+            else status(
+              connection.message || "USB disconnected · press Reconnect LEDs",
+              connection.status === "disconnected" ? "error" : "pending",
+            );
           }
           if (pending && !sending) flush();
         } catch (error) {

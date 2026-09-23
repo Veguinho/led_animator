@@ -5,12 +5,17 @@
 Run commands from the repository root with the virtual environment active.
 Upload the streaming firmware once and run only one streamer at a time.
 Ctrl+C stops a stream; `--clear-on-exit` also turns off the LEDs.
-The current firmware uses four panels on IO10–IO13 and the existing CH340 USB port.
-All streamers default to `--display-size 32`; use `--display-size 16` only
+The current firmware uses nine panels and the existing CH340 USB port.
+All streamers default to `--display-size 48`; use `--display-size 16` only
 with the old single-panel firmware and `--baud 230400`. The launcher and Python commands
-default to 20 FPS to fit full 32×32 frames through the 2,000,000-baud connection.
+default to 30 FPS by overlapping 48×48 UART reception with hardware-timed LED output.
 Upload the updated live firmware once before using these faster defaults.
-The terminal reports measured FPS and skipped frames every five seconds.
+The terminal reports measured FPS and skipped frames every five seconds. The
+panel still receives 30 frames per second, but live audio analysis and animation
+rendering default to 15 updates per second to favor Mac performance. Each
+encoded frame is reused once, avoiding a second FFT, redraw, and RGB565 encode.
+Use `--render-fps 30` only when maximum LED motion is more important than CPU
+usage.
 Acknowledgement timeouts default to 0.2 seconds so an occasional lost reply
 does not pause playback for a full second; retries retain CRC validation and
 duplicate-frame protection. Use `--timeout 1` if a slower host needs more time.
@@ -23,15 +28,15 @@ ESP32 by USB, and run:
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 stream_arduino.py video_clips/my_video.mp4 --fps 20 --loop
+python3 stream_arduino.py video_clips/my_video.mp4 --fps 30 --loop
 ```
 
 The Mac decodes the MP4 with FFmpeg, center-crops it, converts every selected
-frame to a 32×32 RGB565 image, applies an LED intensity curve, and sends the
-2048-byte frames over CH340/UART at 2,000,000 baud. Pure black switches the LED off; colors near
+frame to a 48×48 RGB565 image, applies an LED intensity curve, and sends the
+4608-byte frames over CH340/UART at 2,000,000 baud. Pure black switches the LED off; colors near
 black keep their hue but use progressively less PWM power instead of being
 shown as equally bright colors.
-Direct video playback defaults to 20 FPS, or the source frame rate if lower.
+Direct video playback defaults to 30 FPS, or the source frame rate if lower.
 Nothing is written to a generated `.h` file. With the default `--port auto`,
 the streamer ignores Bluetooth devices and waits up to 30 seconds for a USB
 serial board, so it can be started before disconnecting and reconnecting the
@@ -42,7 +47,7 @@ select the board explicitly:
 ```bash
 python3 stream_arduino.py --list-ports
 python3 stream_arduino.py video_clips/my_video.mp4 \
-  --port /dev/cu.usbserial-1420 --fps 20 --loop
+  --port /dev/cu.usbserial-1420 --fps 30 --loop
 ```
 
 The default `--led-gamma 2.2` gives dark pixels a strong intensity falloff.
@@ -71,18 +76,18 @@ python3 lava_lamp_stream.py --speed 0.75 --brightness 0.8 --clear-on-exit
 ```
 
 The default 48×48 simulation grid is averaged down to the existing 16×16
-artwork, then scaled to the physical 32×32 screen in 2×2 pixel blocks. Use `--seed` for a repeatable flow pattern, `--fps` for the refresh
+artwork, then scaled to the physical 48×48 screen in 3×3 pixel blocks. Use `--seed` for a repeatable flow pattern, `--fps` for the refresh
 rate, or `--port` when more than one USB controller is connected.
 
 ## System audio: wave and spectrum
 
 Both audio styles render directly at the selected screen resolution, which
-defaults to **32×32**. Waves sample all 32 columns, spectrum bars use 32 bands,
+defaults to **48×48**. Waves sample all 48 columns, spectrum bars use 48 bands,
 and colors, trails, and slowed curves are drawn at full resolution. To stream
-the wave to the four-panel firmware using the existing USB connection:
+the wave to the nine-panel firmware using the existing USB connection:
 
 ```bash
-python3 system_audio_visualizer.py --style wave --display-size 32 --fps 20 --clear-on-exit
+python3 system_audio_visualizer.py --style wave --display-size 48 --fps 30 --clear-on-exit
 ```
 
 Use `--display-size 16` with the old single-panel firmware and `--baud 230400`.
@@ -104,7 +109,7 @@ or the microphone, and does not need screen recording permission. It compiles
 automatically on its first run and requires macOS 14.2 or newer plus Apple's
 Command Line Tools. Audio is converted to mono 48 kHz for the visualizer.
 
-The default is a dim red wave with 20% slowdown and 6.3% manual brightness. For mirrored frequency bars, use:
+The default is a red wave with 20% slowdown and 50% manual brightness. For mirrored frequency bars, use:
 
 ```bash
 python3 system_audio_visualizer.py --style spectrum
@@ -115,7 +120,7 @@ Once streaming starts, a **Live palette** panel opens in your browser at
 edit up to six colors with color pickers or hex codes; combine them as a smooth
 gradient or solid bands; reverse their order; and adjust brightness and
 saturation. All changes apply to the next audio frame in either style, with a
-live preview matching the selected display size. **Reset defaults** restores dim red, 20% slowdown, and 6.3% manual brightness. The background service saves settings between runs; direct command-line streams do so only when given `--settings-file PATH`.
+live preview matching the selected display size. **Reset defaults** restores red, 20% slowdown, and 50% manual brightness. The background service saves settings between runs; direct command-line streams do so only when given `--settings-file PATH`.
 
 Choose **Moving rainbow** for a continuous rainbow that travels smoothly
 from left to right across the X axis. It works with both wave and spectrum.
@@ -126,8 +131,8 @@ saturation still apply, and silent audio stays dark. This preset always uses
 a smooth gradient. The original **Rainbow** preset keeps its colors stationary.
 
 Choose **Adaptive** to follow the song's energy in either style. Energetic
-passages bring bright, saturated pinks, reds, oranges, and golds with cooler
-accents for variety. Calmer passages move toward a darker, less saturated version
+passages bring bright, saturated pinks, reds, oranges, and golds with green and
+cooler accents for variety. Calmer passages move toward a darker, less saturated version
 of **Ocean**, preserving its blue, cyan, and teal gradient.
 Adaptive smooths RMS energy and sample-peak power over 250 ms, then compares
 their dBFS levels with their maxima over the last 30 seconds.
@@ -160,8 +165,8 @@ center, with visible edges when a band reaches full height. A faint background
 uses the entire rendered image while audio plays and fades out in silence. The brightness
 is controlled by the slider; audio levels still shape the animation.
 
-At the default 20 FPS, 50% slowdown creates ten new animation frames per second
-and blends between them to keep sending twenty frames. The slider does not change
+At the default 30 FPS, 50% slowdown creates fifteen new animation frames per second
+and blends between them to keep sending thirty frames. The slider does not change
 the serial bandwidth or firmware. A higher slowdown makes reactions more gradual,
 but keeps sampling current audio instead of building an audio backlog.
 
@@ -181,13 +186,14 @@ without the interface. The panel uses Python's standard library and is available
 only on this Mac. An already-running visualizer needs a restart to load the new
 controls.
 
-Click **Refresh app** at the top of the controls page to restart the visualizer
-and reload the page in the same tab. The button briefly pauses the LEDs, closes
-the audio and USB connections, then loads the current code and reconnects.
-Live edits are restored when running the background service or using
-`--settings-file PATH`; other streams reset to startup settings. The Dock launcher
-prevents a second app stream from starting during refresh. The background service
-automatically restarts a worker that exits.
+Click **Reconnect LEDs** at the top of the controls page after unplugging or
+reconnecting the USB cable. The control page and audio capture remain running,
+the stale serial handle is closed, and the app retries for up to one minute until
+exactly one USB LED controller appears and acknowledges a frame. If the minute
+expires, the button becomes available again; click it to begin a new one-minute
+attempt. The button can also reset a connection that is still open. Palette edits
+remain intact, and the Dock launcher continues preventing competing streams from
+opening the same controller.
 
 Both styles follow the audio level in dBFS: loud passages grow and glow more,
 while quiet passages stay smaller and dimmer.
@@ -249,7 +255,7 @@ Install the launcher in your personal Applications folder and pin it to the Dock
 
 Connect the board by USB, then click **LED Audio Visualizer** in the Dock (or
 double-click `~/Applications/LED Audio Visualizer.app`). A Terminal window starts
-the spectrum with dim red, 20% slowdown, and 6.3% manual brightness, and the live color controls open
+the spectrum with red, 20% slowdown, and 50% manual brightness, and the live color controls open
 in your browser once streaming begins. Play audio on the Mac to animate the LEDs.
 If macOS requests audio recording access, allow Terminal in **System Settings →
 Privacy & Security → Screen & System Audio Recording → System Audio Recording
@@ -291,12 +297,14 @@ uses generated tones; actual motion follows whatever is playing on your Mac.
 
 ### Manual brightness and smoothing
 
-The brightness slider sets the software level from 0% to 100% (about 6.3% by default, matching the dim red test at 16/255).
+The brightness slider sets the software level from 0% to 100% (50% by default).
 There is no automatic brightness cycle or peak normalization. The final
 output stage uses a 0.15-second rise and 0.30-second fall; it does not boost dim
 frames. Beats appear quickly while the gentler release avoids abrupt flashes.
 Audio-reactive effects still follow the music and fade in silence.
-The firmware brightness ceiling is 72/255, a 12.5% increase over the previous
-64/255 scale for both dim and bright pixels; black stays off. These percentages
-are software levels, not a measurement of physical light output. This limit
-cannot prevent flashes caused by corrupted LED signals or faulty wiring.
+The firmware preserves source brightness up to 255/255 and permits an
+`R + G + B` total of 255 per pixel, so sparse highlights can be much brighter
+while black stays fully off. FastLED still enforces the estimated 2 A
+whole-panel power budget, which dims large bright areas. These are software
+limits, not measurements of physical light output, and cannot prevent flashes
+caused by corrupted LED signals or faulty wiring.

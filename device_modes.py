@@ -17,7 +17,12 @@ def stop_mode_workers() -> None:
     """Gracefully stop only audio/video workers belonging to this checkout."""
     from audio_service import stop
     stop()
-    targets = {str(ROOT / "system_audio_visualizer.py"), str(ROOT / "preloaded_video/player.py")}
+    targets = {
+        str(ROOT / "system_audio_visualizer.py"),
+        str(ROOT / "mp4_player/player.py"),
+        str(ROOT / "mp4_player/stream.py"),
+        str(ROOT / "preloaded_video/player.py"),  # Legacy entry point.
+    }
     rows = subprocess.check_output(["ps", "ax", "-o", "pid=,command="], text=True)
     for row in rows.splitlines():
         fields = row.strip().split(None, 1)
@@ -52,7 +57,7 @@ def flash_firmware(mode: str, port: str) -> None:
     cli = cli or str(ROOT / ".build/tools/arduino-cli")
     if not Path(cli).is_file():
         raise RuntimeError("arduino-cli is required to switch firmware")
-    if mode == "audio":
+    if mode in ("audio", "stream"):
         sketch = ROOT / "cs2_16x16_player_firmware"
         fqbn = AUDIO_FQBN
         build = ROOT / ".build/panel48"

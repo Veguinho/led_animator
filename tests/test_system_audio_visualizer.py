@@ -7,6 +7,7 @@ import numpy as np
 from audio_palette_controls import PaletteControls, default_settings, make_palette
 from export_arduino import encode_rgb565
 from system_audio_visualizer import (
+    DEFAULT_RENDER_FPS,
     DEFAULT_SENSITIVITY,
     FFT_SIZE,
     GRID_SIZE,
@@ -20,6 +21,31 @@ from system_audio_visualizer import (
 
 
 class AudioVisualizerTests(unittest.TestCase):
+    def test_pc_rendering_is_capped_while_output_remains_at_thirty_fps(self):
+        capture = mock.Mock()
+        capture.latest.return_value = np.zeros(FFT_SIZE, dtype=np.float32)
+        visualizer = mock.Mock()
+        visualizer.render.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
+        frames = iter_audio_frames(
+            capture, visualizer, output_fps=30, render_fps=15,
+        )
+
+        output = [next(frames) for _ in range(30)]
+
+        self.assertEqual(len(output), 30)
+        self.assertEqual(visualizer.render.call_count, 15)
+        self.assertEqual(capture.latest.call_count, 15)
+        self.assertTrue(all(len(frame) == 4608 for frame in output))
+        for index in range(0, len(output), 2):
+            self.assertIs(output[index], output[index + 1])
+
+    def test_render_fps_defaults_to_the_low_cpu_rate(self):
+        args = build_parser().parse_args([])
+
+        self.assertEqual(args.fps, 30)
+        self.assertEqual(args.render_fps, DEFAULT_RENDER_FPS)
+        self.assertLess(args.render_fps, args.fps)
+
     def test_audio_eof_triggers_recovery_instead_of_repeating_stale_samples(self):
         for exit_code in (0, 1, None):
             with self.subTest(exit_code=exit_code):
@@ -171,14 +197,14 @@ class AudioVisualizerTests(unittest.TestCase):
     def test_startup_defaults_and_explicit_rainbow_palette(self):
         settings = default_settings()
         self.assertEqual((settings["preset"], settings["brightness"], settings["slowdown"]),
-                         ("custom", 16 / 255, 20))
+                         ("custom", 0.5, 20))
         self.assertEqual(build_parser().parse_args([]).slowdown, 20)
         for controls in (None, PaletteControls()):
             visualizer = AudioVisualizer("wave", controls=controls)
             visualizer.render(np.zeros(FFT_SIZE))
             self.assertFalse(visualizer._adaptive)
             self.assertEqual(visualizer.slowdown, 20)
-            self.assertEqual(visualizer._settings["brightness"], 16 / 255)
+            self.assertEqual(visualizer._settings["brightness"], 0.5)
         np.testing.assert_array_equal(color_palette(), make_palette(settings))
         palette = make_palette(settings | {"preset": "rainbow", "brightness": 1})
         self.assertEqual(palette.shape, (GRID_SIZE, 3))
@@ -192,7 +218,7 @@ class AudioVisualizerTests(unittest.TestCase):
         np.testing.assert_allclose(hues, np.linspace(0, 5 / 6, GRID_SIZE), atol=0.002)
         self.assertFalse(build_parser().parse_args([]).no_controls)
 
-    def test_default_live_styles_stay_within_the_dim_red_test_level(self):
+    def test_default_live_styles_stay_within_fifty_percent_brightness(self):
         for style in ("wave", "spectrum"):
             for size in (32, 48):
                 for controls in (None, PaletteControls(size=size)):
@@ -200,7 +226,7 @@ class AudioVisualizerTests(unittest.TestCase):
                         visualizer = AudioVisualizer(style, controls=controls, size=size)
                         for _ in range(80):
                             frame = visualizer.render(self.tone(0.9, 440))
-                            self.assertLessEqual(int(frame.max()), 16)
+                            self.assertLessEqual(int(frame.max()), 128)
                             self.assertFalse(np.any(frame[:, :, 1:]))
                         self.assertGreater(int(frame.max()), 0)
 

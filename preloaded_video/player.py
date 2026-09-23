@@ -31,6 +31,7 @@ FRAME_BYTES = DISPLAY_SIZE * DISPLAY_SIZE * 2
 MAX_CLIP_BYTES = 6 * 1024 * 1024
 CHUNK_BYTES = 4096
 HEADER = struct.Struct("<4sBBHII")
+PROTOCOL_MAGIC = b"PV48"
 RESPONSE = struct.Struct("<4sBBHIIII")
 INFO, BEGIN, CHUNK, PLAY, STOP, STATUS = range(1, 7)
 BAUD, VERIFY = 7, 8
@@ -167,7 +168,7 @@ def response_for(connection, sequence: int):
 
 
 def packet_bytes(kind: int, sequence: int, payload: bytes):
-    return HEADER.pack(b"PV32", 1, kind, len(payload), sequence, zlib.crc32(payload)) + payload
+    return HEADER.pack(PROTOCOL_MAGIC, 1, kind, len(payload), sequence, zlib.crc32(payload)) + payload
 
 
 def exchange(connection, kind: int, sequence: int, payload: bytes = b"", retries: int = 3):
