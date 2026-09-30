@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
+import subprocess
 import struct
 import sys
 import time
@@ -23,16 +26,19 @@ from led_animator import (
     map_led_intensity,
     probe_video,
 )
+from video_controls import VideoPlaybackControls
 
 
 WIDTH = 16
 HEIGHT = 16
 FRAME_BYTES = WIDTH * HEIGHT * 2
 DEFAULT_DISPLAY_SIZE = 48
-SERIAL_BAUD = 2_000_000
+SERIAL_BAUD = 1_500_000
 # Leave room for decoding and parallel LED submission as well as UART traffic.
 DEFAULT_STREAM_FPS = 12.0
 DEFAULT_PORT_WAIT = 30.0
+VIDEO_FIRMWARE_OUTPUT_SCALE = 60
+MAX_VIDEO_PIXEL_PWM_TOTAL = 4
 
 # Common USB serial names on macOS, Linux, and boards using WCH or Silicon Labs
 # USB-to-UART chips. Restricting automatic selection to these names prevents a
@@ -56,6 +62,7 @@ PROTOCOL_VERSION = 1
 PACKET_HELLO = 1
 PACKET_FRAME = 2
 PACKET_CLEAR = 3
+PACKET_COMPRESSED_FRAME = 4
 STATUS_READY = 1
 STATUS_ACK = 2
 STATUS_NAK = 3
@@ -78,6 +85,7 @@ class FrameSource:
     fps: float
     iter_frames: Callable[[], Iterator[bytes]]
     size: int = 16
+    iter_frames_at: Callable[[float], Iterator[bytes]] | None = None
 
 
 @dataclass(frozen=True)
@@ -178,16 +186,26 @@ def iter_compiled_video(
     output_fps: float,
     led_gamma: float = LED_INTENSITY_GAMMA,
     size: int = 16,
+    flash_limit: bool = False,
+    limiter: VideoFlashLimiter | None = None,
+    start_seconds: float = 0.0,
 ) -> Iterator[bytes]:
     """Decode, sample, resize, and RGB565-encode without saving the video."""
     info = probe_video(path)
     next_output_time = 0.0
-    for index, frame in enumerate(iter_square_video_frames(path, info, size)):
+    limiter = limiter or (VideoFlashLimiter(output_fps) if flash_limit else None)
+    decode_options = {"start_seconds": start_seconds} if start_seconds else {}
+    for index, frame in enumerate(iter_square_video_frames(path, info, size, **decode_options)):
         frame_time = index / source_fps
         if frame_time + 1e-12 < next_output_time:
             continue
         grid = frame if frame.shape == (size, size, 3) else frame_to_led_grid(frame, size)
-        yield encode_rgb565(map_led_intensity(grid, led_gamma))
+        mapped = map_led_intensity(grid, led_gamma)
+        if limiter is not None:
+            mapped = limiter.apply(mapped)
+            yield encode_limited_video_rgb565(mapped)
+        else:
+            yield encode_rgb565(mapped)
         next_output_time += 1.0 / output_fps
 
 
@@ -196,6 +214,7 @@ def open_video(
     target_fps: float | None = None,
     led_gamma: float = LED_INTENSITY_GAMMA,
     size: int = 16,
+    flash_limit: bool = False,
 ) -> FrameSource:
     if not path.is_file():
         raise ValueError(f"video does not exist: {path}")
@@ -207,11 +226,108 @@ def open_video(
         raise ValueError("FPS must be a positive finite number")
     if not np.isfinite(led_gamma) or led_gamma <= 0:
         raise ValueError("LED gamma must be a positive finite number")
+    # Keep the exposure state across repeats of a short loop. Recreating it
+    # each pass would dim the opening for a second every time it restarts.
+    limiter = VideoFlashLimiter(fps) if flash_limit else None
     return FrameSource(
         fps=fps,
-        iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma, size),
+        iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma, size,
+                                               flash_limit, limiter),
         size=size,
+        iter_frames_at=lambda seconds: iter_compiled_video(
+            path, info.fps, fps, led_gamma, size, flash_limit, limiter,
+            start_seconds=seconds),
     )
+
+
+def probe_video_duration(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    try:
+        duration = float(json.loads(result.stdout)["format"]["duration"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("video duration is unavailable") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("video duration is unavailable")
+    return duration
+
+
+def limit_video_flash(frame: np.ndarray) -> np.ndarray:
+    """Bound each LED's total light and strongest channel before RGB565."""
+    values = frame.astype(np.float32)
+    total = values.sum(axis=2, keepdims=True)
+    peak = values.max(axis=2, keepdims=True)
+    strong_channels = np.count_nonzero(values >= peak * 0.45,
+                                       axis=2, keepdims=True)
+    # Cyan/magenta/yellow stage lights can be as dazzling as white even
+    # though their third channel is dark. Give those pixels their own cap.
+    # RGB565 needs a little more input for neutral pixels to reach the same
+    # visible PWM step as colored pixels; their final PWM is still capped.
+    limit = np.where(strong_channels == 3, 36.0,
+                     np.where(strong_channels == 2, 24.0, 32.0))
+    values *= np.minimum(1.0, limit / np.maximum(total, 1.0))
+    np.minimum(values, 20.0, out=values)
+    return np.rint(values).clip(0, 255).astype(np.uint8)
+
+
+def encode_limited_video_rgb565(frame: np.ndarray) -> bytes:
+    """Cap the PWM bytes the live firmware will actually transmit.
+
+    RGB565 rounds small values in uneven steps. A limit applied only before
+    encoding can therefore still leave a few harsh cyan or white pixels.
+    """
+    values = frame.copy()
+    for _ in range(32):
+        payload = encode_rgb565(values)
+        packed = np.frombuffer(payload, dtype="<u2").reshape(values.shape[:2])
+        red5 = (packed >> 11) & 31
+        green6 = (packed >> 5) & 63
+        blue5 = packed & 31
+        red = (red5 << 3) | (red5 >> 2)
+        green = (green6 << 2) | (green6 >> 4)
+        blue = (blue5 << 3) | (blue5 >> 2)
+        pwm_total = ((red * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
+                     + (green * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
+                     + (blue * VIDEO_FIRMWARE_OUTPUT_SCALE // 255))
+        too_bright = pwm_total > MAX_VIDEO_PIXEL_PWM_TOTAL
+        if not np.any(too_bright):
+            return payload
+        scale = (MAX_VIDEO_PIXEL_PWM_TOTAL /
+                 pwm_total[too_bright].astype(np.float32))[:, None]
+        values[too_bright] = np.floor(values[too_bright] * scale).astype(np.uint8)
+    raise RuntimeError("video pixel PWM limit did not converge")
+
+
+class VideoFlashLimiter:
+    """Limit both sudden flashes and sustained bright scenes."""
+
+    def __init__(self, fps: float):
+        self.allowed_mean = 0.0
+        self.max_rise = 12.0 / fps
+        self.max_scene_mean = 8.0
+        self.previous_frame: np.ndarray | None = None
+        self.steady_frames = 0
+
+    def apply(self, frame: np.ndarray) -> np.ndarray:
+        if self.previous_frame is not None:
+            motion = float(np.abs(frame.astype(np.int16) -
+                                  self.previous_frame.astype(np.int16)).mean())
+            self.steady_frames = self.steady_frames + 1 if motion < 2.0 else 0
+        self.previous_frame = frame.copy()
+        limited = limit_video_flash(frame)
+        mean = float(limited.mean())
+        # A stable title card can be brighter without allowing short stage
+        # light bursts to grow into sustained full-panel flashes.
+        scene_ceiling = 12.0 if self.steady_frames >= 8 else self.max_scene_mean
+        self.allowed_mean = min(mean, scene_ceiling,
+                                self.allowed_mean + self.max_rise)
+        if mean > self.allowed_mean and mean > 0:
+            return np.rint(limited.astype(np.float32) *
+                           (self.allowed_mean / mean)).astype(np.uint8)
+        return limited
 
 
 def list_serial_ports() -> list[str]:
@@ -292,9 +408,11 @@ def open_serial(port: str, timeout: float, baudrate: int = SERIAL_BAUD) -> Seria
 def handshake(
     connection: SerialConnection, fps: float, timeout: float, retries: int,
     display_size: int = 16,
+    video_mode: bool = False,
 ) -> None:
     frame_duration_us = round(1_000_000 / fps)
-    payload = HELLO.pack(display_size, display_size, 1, 0, frame_duration_us)
+    payload = HELLO.pack(display_size, display_size, 1, int(video_mode),
+                         frame_duration_us)
     exchange_packet(
         connection,
         PACKET_HELLO,
@@ -338,6 +456,9 @@ def stream_frames(
     drop_late: bool,
     rebase_late: bool = False,
     display_size: int = 16,
+    compress: bool = False,
+    start_seconds: float = 0.0,
+    controls: VideoPlaybackControls | None = None,
 ) -> tuple[int, int]:
     if drop_late and rebase_late:
         raise ValueError("drop_late and rebase_late cannot both be enabled")
@@ -348,68 +469,94 @@ def stream_frames(
     period = 1.0 / source.fps
     stats_start = time.monotonic()
     stats_sent = 0
+    pass_start_seconds = start_seconds
 
     while True:
         frames_this_pass = 0
         pass_start: float | None = None
-        for payload in source.iter_frames():
-            payload = resize_rgb565(payload, source.size, display_size)
-            frames_this_pass += 1
-            if pass_start is None:
-                # Start the clock after FFmpeg produces its first frame, so
-                # process startup never causes the beginning of a clip to drop.
-                pass_start = time.monotonic()
-            pass_index = frames_this_pass - 1
-            deadline = pass_start + pass_index * period
-            now = time.monotonic()
-            if now - deadline >= period:
-                if rebase_late:
-                    # A live/procedural source has no timeline worth catching
-                    # up. Keep the last valid panel frame during the pause,
-                    # send this newly rendered frame once, and establish a new
-                    # evenly spaced clock. This avoids CPU stalls turning into
-                    # bursts of discarded animation states and visible jumps.
-                    resynced += max(1, int((now - deadline) // period))
-                    pass_start = now - pass_index * period
-                    deadline = now
-                elif drop_late:
-                    dropped += 1
-                    timeline_index += 1
-                    continue
-            if now < deadline:
-                time.sleep(deadline - now)
-            exchange_packet(
-                connection,
-                PACKET_FRAME,
-                timeline_index + 1,
-                payload,
-                STATUS_ACK,
-                timeout,
-                retries,
-            )
-            sent += 1
-            if sent == 1:
-                print(
-                    f"Controller acknowledged the first {display_size}×{display_size} frame.",
-                    file=sys.stderr,
+        seek_to: float | None = None
+        if pass_start_seconds and source.iter_frames_at is None:
+            raise ValueError("this frame source does not support seeking")
+        frames = (source.iter_frames_at(pass_start_seconds)
+                  if source.iter_frames_at is not None else source.iter_frames())
+        try:
+            for payload in frames:
+                if controls is not None:
+                    seek_to = controls.take_seek()
+                    if seek_to is not None:
+                        break
+                payload = resize_rgb565(payload, source.size, display_size)
+                frames_this_pass += 1
+                if controls is not None:
+                    controls.set_position(pass_start_seconds + (frames_this_pass - 1) * period)
+                if pass_start is None:
+                    # Start the clock after FFmpeg produces its first frame, so
+                    # process startup never causes the beginning of a clip to drop.
+                    pass_start = time.monotonic()
+                pass_index = frames_this_pass - 1
+                deadline = pass_start + pass_index * period
+                now = time.monotonic()
+                if now - deadline >= period:
+                    if rebase_late:
+                        # A live/procedural source has no timeline worth catching
+                        # up. Keep the last valid panel frame during the pause,
+                        # send this newly rendered frame once, and establish a new
+                        # evenly spaced clock. This avoids CPU stalls turning into
+                        # bursts of discarded animation states and visible jumps.
+                        resynced += max(1, int((now - deadline) // period))
+                        pass_start = now - pass_index * period
+                        deadline = now
+                    elif drop_late:
+                        dropped += 1
+                        timeline_index += 1
+                        continue
+                if now < deadline:
+                    time.sleep(deadline - now)
+                compressed = zlib.compress(payload, 3) if compress else payload
+                packet_type = (PACKET_COMPRESSED_FRAME
+                               if len(compressed) < len(payload) else PACKET_FRAME)
+                exchange_packet(
+                    connection,
+                    packet_type,
+                    timeline_index + 1,
+                    compressed if packet_type == PACKET_COMPRESSED_FRAME else payload,
+                    STATUS_ACK,
+                    timeout,
+                    retries,
                 )
-            stats_now = time.monotonic()
-            if stats_now - stats_start >= 5:
-                timing = f"{dropped} late frames skipped total"
-                if rebase_late:
-                    timing = f"{resynced} late intervals smoothly resynchronized total"
-                print(
-                    f"Live playback: {(sent - stats_sent)/(stats_now - stats_start):.1f} FPS; "
-                    f"{timing}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                stats_start, stats_sent = stats_now, sent
-            timeline_index += 1
+                sent += 1
+                if sent == 1:
+                    print(
+                        f"Controller acknowledged the first {display_size}×{display_size} frame.",
+                        file=sys.stderr,
+                    )
+                stats_now = time.monotonic()
+                if stats_now - stats_start >= 5:
+                    timing = f"{dropped} late frames skipped total"
+                    if rebase_late:
+                        timing = f"{resynced} late intervals smoothly resynchronized total"
+                    print(
+                        f"Live playback: {(sent - stats_sent)/(stats_now - stats_start):.1f} FPS; "
+                        f"{timing}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    stats_start, stats_sent = stats_now, sent
+                timeline_index += 1
+        finally:
+            close = getattr(frames, "close", None)
+            if close is not None:
+                close()
+        if seek_to is not None:
+            pass_start_seconds = seek_to
+            continue
         if frames_this_pass == 0:
             raise RuntimeError("video produced no frames")
         if not loop:
+            if controls is not None:
+                controls.finish()
             return sent, dropped
+        pass_start_seconds = 0.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -442,7 +589,17 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: 2.2)"
         ),
     )
+    parser.add_argument("--no-flash-limit", action="store_true",
+                        help="disable 48x48 video highlight and transition limiting")
+    parser.add_argument("--no-compression", action="store_true",
+                        help="send uncompressed frames (for older firmware)")
     parser.add_argument("--loop", action="store_true", help="repeat until Ctrl-C")
+    parser.add_argument("--start", type=float, default=0.0,
+                        help="begin at this time in the video, in seconds")
+    parser.add_argument("--controls-port", type=int, default=8765,
+                        help="local video control panel port (default: 8765)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="do not open the local video control panel")
     parser.add_argument(
         "--timeout",
         type=float,
@@ -480,10 +637,16 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --port-wait cannot be negative")
     if args.retries < 0:
         raise SystemExit("error: --retries cannot be negative")
+    if not 0 <= args.controls_port <= 65535:
+        raise SystemExit("error: --controls-port must be between 0 and 65535")
 
     connection: SerialConnection | None = None
+    control_server = None
     try:
-        source = open_video(args.video, args.fps, args.led_gamma, args.display_size)
+        source = open_video(args.video, args.fps, args.led_gamma, args.display_size,
+                            flash_limit=args.display_size == 48 and not args.no_flash_limit)
+        duration = probe_video_duration(args.video)
+        controls = VideoPlaybackControls(args.video.name, duration, source.fps, args.start)
         port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port} for {args.display_size}×{args.display_size} frames...", file=sys.stderr)
         connection = open_serial(port, args.timeout, baudrate=args.baud)
@@ -491,7 +654,17 @@ def main(argv: list[str] | None = None) -> int:
         # optional 1.5-second matrix coverage test in the sketch.
         time.sleep(0.2)
         connection.reset_input_buffer()
-        handshake(connection, source.fps, args.timeout, max(args.retries, 3), args.display_size)
+        handshake(connection, source.fps, args.timeout, max(args.retries, 3),
+                  args.display_size,
+                  video_mode=args.display_size == 48 and not args.no_flash_limit)
+        from audio_palette_controls import PaletteControls, PaletteServer
+        control_server = PaletteServer(PaletteControls(), args.controls_port,
+                                       video_controls=controls, video_path=args.video)
+        control_server.start()
+        print(f"Video controls: {control_server.url}/#video", file=sys.stderr)
+        if not args.no_browser:
+            import webbrowser
+            webbrowser.open(f"{control_server.url}/#video")
         print(
             f"Converting and streaming at {source.fps:.3f} FPS. Ctrl-C stops.",
             file=sys.stderr,
@@ -504,6 +677,9 @@ def main(argv: list[str] | None = None) -> int:
             retries=args.retries,
             drop_late=not args.no_drop,
             display_size=args.display_size,
+            compress=args.display_size == 48 and not args.no_compression,
+            start_seconds=args.start,
+            controls=controls,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
         return 0
@@ -514,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
+        if control_server is not None:
+            control_server.close()
         if connection is not None:
             if args.clear_on_exit:
                 try:

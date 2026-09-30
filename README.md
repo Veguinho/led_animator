@@ -1,25 +1,29 @@
 # 💡 LED Animator
 
-Live lava, audio-reactive waves, and video playback on a **32×32 RGB LED
-screen** built from four 16×16 panels. Python creates the frames; an ESP32-S3
-drives IO10–IO13 independently and receives frames through the existing CH340 USB
-connection. Full 32×32 streaming defaults to 20 FPS on this hardware.
-Live audio uses four RMT outputs and waits for each frame to finish before
-acknowledging it; preloaded video retains its separate LCD_CAM driver.
+Live lava, audio-reactive waves, and video playback on a **48×48 RGB LED
+screen** built from nine 16×16 panels. Python creates the frames; an ESP32-S3
+drives each panel independently and receives frames through the existing CH340 USB
+connection. The compressed 48×48 video path has been measured at 24 FPS.
+The live firmware routes IO9 and IO10 through RMT and the other seven panels
+through LCD_CAM. Preloaded video uses a separate firmware. The live video
+player opens a local **Video** tab at `http://127.0.0.1:8765/#video` for
+timeline and exact-time seeking. Run `python video_app.py VIDEO.mp4` to use its
+browser preview without connecting the LED board.
 Viewed from the front, the panel layout is:
 
 ```text
-IO11  IO10
-IO13  IO12
+IO11  IO10  IO9
+IO13  IO12  IO20
+IO46  IO17  IO18
 ```
 
-The images on the two left panels (IO11 and IO13) are mirrored horizontally.
+See the [hardware guide](docs/hardware.md) for the current panel mapping.
 
 Live audio starts in dim red at the tested 16/255 level (about 6.3%), with
 manual brightness control, softened frame changes and the normal firmware brightness ceiling of 72/255.
-The previews below show the original 16×16 effects. See the
-[native 32×32 spectrum preview](docs/32x32-preview.md) for the current logical
-screen and four-panel mapping; lava still scales its 16×16 artwork to fill the screen.
+The previews below show the original 16×16 effects. The
+[native 32×32 spectrum preview](docs/32x32-preview.md) documents the earlier
+four-panel mapping; lava still scales its 16×16 artwork.
 
 [32×32 preview](docs/32x32-preview.md) · [Quick start](#quick-start) · [Hardware](docs/hardware.md) ·
 [Live streaming](docs/live-streaming.md) · [Video conversion](docs/video-conversion.md)

@@ -1,4 +1,5 @@
 #include <FastLED.h>
+#include <miniz.h>
 #include "platforms/esp/32/drivers/lcd_spi/bus_traits.h"
 #include "panel_layout.h"
 
@@ -6,24 +7,26 @@
 #error "This sketch requires an ESP32-S3."
 #endif
 
-// Bake the old 72/255 global brightness into every pixel byte before it reaches
+// Bake a 60/255 brightness ceiling into every pixel byte before it reaches
 // any output lane. Keep the driver at 255 so all nine GPIOs transmit the same
 // already-limited values, including the top-right panel on GPIO9.
-constexpr uint8_t OUTPUT_SCALE = 72;
+constexpr uint8_t OUTPUT_SCALE = 60;
 constexpr uint8_t DRIVER_BRIGHTNESS = 255;
 constexpr uint16_t MAX_PIXEL_RGB_TOTAL = 64;
 constexpr uint16_t MAX_TRANSMITTED_RGB_TOTAL =
     MAX_PIXEL_RGB_TOTAL * OUTPUT_SCALE / 255;
+constexpr uint8_t MAX_VIDEO_RGB_TOTAL = 4;
 
-// Total estimated LED budget across ALL nine panels. Keep the existing limit
-// until the external 5 V supply, fuses and power wiring have been sized.
+// FastLED estimates 1 mA of idle draw per LED: nine 16x16 panels already
+// exceed 2 A before any channel lights. A 4 A ceiling leaves room for that
+// baseline plus the firmware's separately capped channel output.
 // This software estimate is not a substitute for hardware current protection.
-constexpr uint32_t MAX_POWER_MILLIAMPS = 2000;
+constexpr uint32_t MAX_POWER_MILLIAMPS = 4000;
 constexpr bool RUN_STARTUP_MATRIX_TEST = false;
 
 // The installed board's only USB socket uses a CH340 connected to UART0.
 // Match the live Python app; firmware flashing remains at 115200 baud.
-constexpr uint32_t SERIAL_BAUD = 2000000;
+constexpr uint32_t SERIAL_BAUD = 1500000;
 constexpr uint16_t BYTES_PER_FRAME = NUM_LEDS * 2;
 constexpr uint16_t MAX_PACKET_PAYLOAD = BYTES_PER_FRAME;
 
@@ -34,6 +37,7 @@ constexpr uint8_t PROTOCOL_VERSION = 1;
 constexpr uint8_t PACKET_HELLO = 1;
 constexpr uint8_t PACKET_FRAME = 2;
 constexpr uint8_t PACKET_CLEAR = 3;
+constexpr uint8_t PACKET_COMPRESSED_FRAME = 4;
 constexpr uint8_t STATUS_READY = 1;
 constexpr uint8_t STATUS_ACK = 2;
 constexpr uint8_t STATUS_NAK = 3;
@@ -51,7 +55,10 @@ const uint8_t RESPONSE_MAGIC[4] = {'L', 'E', 'D', 'R'};
 CRGB leds[NUM_LEDS];
 // Only a complete, CRC-verified payload can replace the display buffer.
 uint8_t packetPayload[MAX_PACKET_PAYLOAD];
+uint8_t expandedFrame[BYTES_PER_FRAME];
+tinfl_decompressor frameDecompressor;
 bool streamReady = false;
+bool videoMode = false;
 bool hasLastFrame = false;
 uint32_t lastFrameSequence = 0;
 
@@ -114,10 +121,19 @@ CRGB limitPixelBrightness(CRGB color) {
   return color;
 }
 
-void showLimitedFrame() {
+void showLimitedFrame(bool videoFrame = false) {
   FastLED.wait();
   for (uint16_t index = 0; index < NUM_LEDS; ++index) {
-    leds[index] = limitPixelBrightness(leds[index]);
+    CRGB color = limitPixelBrightness(leds[index]);
+    if (videoFrame) {
+      const uint16_t total = static_cast<uint16_t>(color.r) + color.g + color.b;
+      if (total > MAX_VIDEO_RGB_TOTAL) {
+        color.r = static_cast<uint16_t>(color.r) * MAX_VIDEO_RGB_TOTAL / total;
+        color.g = static_cast<uint16_t>(color.g) * MAX_VIDEO_RGB_TOTAL / total;
+        color.b = static_cast<uint16_t>(color.b) * MAX_VIDEO_RGB_TOTAL / total;
+      }
+    }
+    leds[index] = color;
   }
   // Reapply the ceilings at every transmission, including startup tests.
   FastLED.setBrightness(DRIVER_BRIGHTNESS);
@@ -187,35 +203,54 @@ void drawFrame(const uint8_t *payload) {
     leds[physicalIndex(row, column)] = decodeRgb565(color);
   }
   // Finish the limited LED transfer before ACK permits another frame.
-  showLimitedFrame();
+  showLimitedFrame(videoMode);
 }
 
 void handlePacket(uint8_t type, uint16_t length, uint32_t sequence) {
   if (type == PACKET_HELLO) {
     // width, height, pixel format, reserved, frame duration (microseconds)
     if (length != 8 || packetPayload[0] != WIDTH ||
-        packetPayload[1] != HEIGHT || packetPayload[2] != 1) {
+        packetPayload[1] != HEIGHT || packetPayload[2] != 1 ||
+        packetPayload[3] > 1) {
       sendResponse(STATUS_NAK, ERROR_BAD_DISPLAY, sequence);
       return;
     }
     streamReady = true;
+    videoMode = packetPayload[3] == 1;
     hasLastFrame = false;
     sendResponse(STATUS_READY, 0, sequence);
     return;
   }
 
-  if (type == PACKET_FRAME) {
+  if (type == PACKET_FRAME || type == PACKET_COMPRESSED_FRAME) {
     if (!streamReady) {
       sendResponse(STATUS_NAK, ERROR_NOT_READY, sequence);
       return;
     }
-    if (length != BYTES_PER_FRAME) {
+    if ((type == PACKET_FRAME && length != BYTES_PER_FRAME) ||
+        (type == PACKET_COMPRESSED_FRAME && (length == 0 || length >= BYTES_PER_FRAME))) {
       sendResponse(STATUS_NAK, ERROR_BAD_LENGTH, sequence);
       return;
     }
     // If an ACK was lost, acknowledge the retry without drawing it twice.
     if (!hasLastFrame || sequence != lastFrameSequence) {
-      drawFrame(packetPayload);
+      const uint8_t *frame = packetPayload;
+      if (type == PACKET_COMPRESSED_FRAME) {
+        tinfl_init(&frameDecompressor);
+        size_t inputLength = length;
+        size_t outputLength = sizeof(expandedFrame);
+        const tinfl_status result = tinfl_decompress(
+            &frameDecompressor, packetPayload, &inputLength,
+            expandedFrame, expandedFrame, &outputLength,
+            TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+        if (result != TINFL_STATUS_DONE || inputLength != length ||
+            outputLength != BYTES_PER_FRAME) {
+          sendResponse(STATUS_NAK, ERROR_BAD_LENGTH, sequence);
+          return;
+        }
+        frame = expandedFrame;
+      }
+      drawFrame(frame);
       lastFrameSequence = sequence;
       hasLastFrame = true;
     }
@@ -280,15 +315,16 @@ void setup() {
   // Allow margin for USB packet gaps and incomplete frames.
   PANEL_SERIAL.setTimeout(500);
 
-  // Use the ESP32-S3 parallel LCD_CAM channel driver. Runtime channel
-  // configuration is also required because GPIO20 is valid for this
+  // IO9 and IO10 use RMT to avoid flashes seen on those two tiles; the
+  // other seven use ESP32-S3 parallel LCD_CAM. Runtime channel configuration
+  // is also required because GPIO20 is valid for this
   // CH340/UART board but intentionally blocked by FastLED's compile-time API
   // as the native USB D+ pin.
   static_assert(PANEL_COUNT == 9, "This firmware configures nine panel outputs.");
-  FastLED.setExclusiveDriver<fl::Bus::LCD_CLOCKLESS>();
-  fl::ChannelOptions options;
-  options.mBus = fl::Bus::LCD_CLOCKLESS;
   for (uint8_t panel = 0; panel < PANEL_COUNT; ++panel) {
+    fl::ChannelOptions options;
+    options.mBus = (DATA_PINS[panel] == 10 || DATA_PINS[panel] == 9)
+        ? fl::Bus::RMT : fl::Bus::LCD_CLOCKLESS;
     FastLED.add(fl::ChannelConfig(
         fl::makeClockless<fl::TIMING_WS2812_800KHZ>(DATA_PINS[panel]),
         fl::span<CRGB>(leds + panel * PANEL_LEDS, PANEL_LEDS), GRB, options));

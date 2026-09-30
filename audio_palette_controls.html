@@ -108,6 +108,52 @@
         grid-template-columns: minmax(0, 1.5fr) minmax(260px, 1fr);
         gap: 24px;
       }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 24px;
+      }
+      .tabs button[aria-selected="true"] {
+        border-color: var(--accent);
+        background: #30283f;
+      }
+      .video-card {
+        max-width: 760px;
+      }
+      .video-preview {
+        display: block;
+        width: 100%;
+        max-width: 560px;
+        aspect-ratio: 16 / 9;
+        margin: 20px auto 8px;
+        border-radius: 12px;
+        background: #08080c;
+      }
+      .video-time {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        font-size: 13px;
+        margin: 8px 0 24px;
+      }
+      .seek-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .seek-row input {
+        width: 190px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #24242d;
+        color: inherit;
+        padding: 10px 14px;
+        font: inherit;
+        font-variant-numeric: tabular-nums;
+      }
       .card {
         background: #19191f;
         border: 1px solid var(--line);
@@ -334,9 +380,9 @@
     <main>
       <header>
         <div>
-          <div class="eyebrow">System audio / LED studio</div>
-          <h1>Live palette</h1>
-          <p>Shape the colors and motion. Let the music do the rest.</p>
+          <div id="app-eyebrow" class="eyebrow">System audio / LED studio</div>
+          <h1 id="app-title">Live palette</h1>
+          <p id="app-description">Shape the colors and motion. Let the music do the rest.</p>
         </div>
         <div class="header-actions">
           <div id="status" class="status" role="status" aria-live="polite">Connecting…</div>
@@ -346,6 +392,11 @@
           </button>
         </div>
       </header>
+      <nav class="tabs" role="tablist" aria-label="LED controls">
+        <button id="audio-tab" type="button" role="tab" aria-controls="audio-panel" aria-selected="true">Audio palette</button>
+        <button id="video-tab" type="button" role="tab" aria-controls="video-panel" aria-selected="false">Vídeo</button>
+      </nav>
+      <section id="audio-panel" role="tabpanel" aria-labelledby="audio-tab">
       <div class="layout">
         <section class="card" aria-label="Visualization controls">
           <fieldset id="controls" disabled>
@@ -447,6 +498,31 @@
           <p class="note">Set brightness with the slider. Frame transitions remain smooth.</p>
         </aside>
       </div>
+      </section>
+      <section id="video-panel" role="tabpanel" aria-labelledby="video-tab" hidden>
+        <div class="card video-card">
+          <div class="eyebrow">48 × 48 LED player</div>
+          <h2 id="video-name">Player de vídeo</h2>
+          <p id="video-help">Inicie um vídeo para escolher de onde ele será reproduzido.</p>
+          <div id="video-preview-wrap" hidden>
+            <video id="video-preview" class="video-preview" controls preload="metadata" playsinline
+              aria-label="Prévia do vídeo"></video>
+            <p class="note">Explore o trecho aqui ou na linha do tempo. Com o painel conectado, o mesmo controle muda os LEDs.</p>
+          </div>
+          <fieldset id="video-controls" disabled>
+            <label for="video-progress" class="range-label">Escolha o momento</label>
+            <input id="video-progress" type="range" min="0" max="1" step="0.01" value="0" />
+            <div class="video-time"><span id="video-current">00:00</span><span id="video-duration">00:00</span></div>
+            <label for="video-time-input">Ir para um horário específico</label>
+            <div class="seek-row">
+              <input id="video-time-input" type="text" inputmode="numeric" placeholder="MM:SS ou HH:MM:SS" aria-label="Horário do vídeo" />
+              <button id="video-seek" type="button">Tocar daqui</button>
+              <button id="video-restart" type="button">Voltar ao início</button>
+            </div>
+          </fieldset>
+          <p id="video-message" class="note" role="status" aria-live="polite"></p>
+        </div>
+      </section>
     </main>
     <script>
       "use strict";
@@ -469,8 +545,138 @@
         sending = false,
         refreshing = false,
         refreshError = null,
-        editVersion = 0;
+        editVersion = 0,
+        activeTab = null,
+        videoEditing = false,
+        videoSeeking = false,
+        videoConnected = false,
+        previewAvailable = false,
+        previewStart = 0,
+        ignorePreviewSeek = false;
       const context = $("preview").getContext("2d");
+      const videoPreview = $("video-preview");
+      function setTab(name) {
+        activeTab = name;
+        for (const tab of ["audio", "video"]) {
+          const selected = tab === name;
+          $(tab + "-tab").setAttribute("aria-selected", String(selected));
+          $(tab + "-panel").hidden = !selected;
+        }
+        window.location.hash = name;
+      }
+      $("audio-tab").addEventListener("click", () => setTab("audio"));
+      $("video-tab").addEventListener("click", () => setTab("video"));
+      function formatTime(seconds) {
+        const total = Math.max(0, Math.floor(seconds));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor(total / 60) % 60;
+        const rest = total % 60;
+        return hours
+          ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`
+          : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+      }
+      function parseTime(value) {
+        const parts = value.trim().split(":");
+        if (!parts.length || parts.length > 3 || parts.some(part => !/^\d+$/.test(part)))
+          throw new Error("Digite um horário como MM:SS ou HH:MM:SS.");
+        let seconds = 0;
+        for (const part of parts) seconds = seconds * 60 + Number(part);
+        return seconds;
+      }
+      function setPreviewTime(seconds) {
+        if (!previewAvailable || Math.abs(videoPreview.currentTime - seconds) < 0.05) return;
+        ignorePreviewSeek = true;
+        videoPreview.currentTime = seconds;
+        setTimeout(() => { ignorePreviewSeek = false; }, 1000);
+      }
+      videoPreview.addEventListener("loadedmetadata", () => {
+        setPreviewTime(previewStart || 0.001);
+      });
+      videoPreview.addEventListener("seeked", () => {
+        if (ignorePreviewSeek) { ignorePreviewSeek = false; return; }
+        seekVideo(videoPreview.currentTime, false);
+      });
+      videoPreview.addEventListener("timeupdate", () => {
+        if (!videoConnected && !videoEditing) {
+          $("video-progress").value = videoPreview.currentTime;
+          $("video-current").textContent = formatTime(videoPreview.currentTime);
+        }
+      });
+      function renderVideo(video, fileAvailable = false) {
+        videoConnected = Boolean(video?.connected);
+        if (fileAvailable && !previewAvailable) {
+          previewAvailable = true;
+          previewStart = video?.position || 0;
+          videoPreview.src = "/api/video/file";
+          videoPreview.load();
+        } else if (!fileAvailable && previewAvailable) {
+          previewAvailable = false;
+          videoPreview.removeAttribute("src");
+          videoPreview.load();
+        }
+        $("video-preview-wrap").hidden = !fileAvailable;
+        $("video-controls").disabled = !video || videoSeeking;
+        if (!video) {
+          $("video-name").textContent = "Player de vídeo";
+          $("video-help").textContent = "Inicie um vídeo para escolher o ponto de reprodução.";
+          $("video-message").textContent = "Nenhum vídeo conectado.";
+          return;
+        }
+        $("video-name").textContent = video.name;
+        $("video-help").textContent = video.connected
+          ? `Reproduzindo na matriz de LEDs a ${video.fps} FPS.`
+          : "Prévia no navegador; o painel de LEDs está desconectado.";
+        $("video-progress").max = Math.max(0, video.duration - 1 / video.fps);
+        if (!videoEditing) {
+          const position = !video.connected && videoPreview.readyState >= 1
+            ? videoPreview.currentTime : video.position;
+          $("video-progress").value = position;
+          $("video-current").textContent = formatTime(position);
+        }
+        $("video-duration").textContent = formatTime(video.duration);
+        $("video-message").textContent = !video.connected
+          ? "Escolha um trecho na prévia ou na linha do tempo."
+          : video.seeking ? "Indo para o momento escolhido…"
+          : video.playing ? "Vídeo tocando nos LEDs." : "Reprodução concluída.";
+      }
+      async function seekVideo(seconds, syncPreview = true, playPreview = false) {
+        if (videoSeeking) return;
+        videoSeeking = true;
+        $("video-controls").disabled = true;
+        $("video-message").textContent = "Indo para o momento escolhido…";
+        try {
+          if (syncPreview) setPreviewTime(seconds);
+          if (playPreview && previewAvailable) videoPreview.play().catch(() => {});
+          const data = await request("/api/video/seek", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ seconds }),
+          });
+          $("video-time-input").value = "";
+          renderVideo(data.video, previewAvailable);
+        } catch (error) {
+          $("video-message").textContent = error.message;
+        } finally {
+          videoSeeking = false;
+          $("video-controls").disabled = false;
+        }
+      }
+      $("video-progress").addEventListener("input", () => {
+        videoEditing = true;
+        $("video-current").textContent = formatTime(Number($("video-progress").value));
+      });
+      $("video-progress").addEventListener("change", () => {
+        videoEditing = false;
+        seekVideo(Number($("video-progress").value));
+      });
+      $("video-seek").addEventListener("click", () => {
+        try { seekVideo(parseTime($("video-time-input").value), true, true); }
+        catch (error) { $("video-message").textContent = error.message; }
+      });
+      $("video-time-input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") $("video-seek").click();
+      });
+      $("video-restart").addEventListener("click", () => seekVideo(0, true, true));
       function status(message, state = "live") {
         $("status").textContent = message;
         $("status").dataset.state = state;
@@ -745,6 +951,25 @@
         try {
           const data = await request("/api/state");
           if (refreshing) { setTimeout(poll, 250); return; }
+          if (activeTab === null) setTab(location.hash === "#audio" ? "audio"
+            : data.mode === "video" || location.hash === "#video" ? "video" : "audio");
+          $("audio-tab").disabled = data.mode === "video";
+          renderVideo(data.video, data.video_file_available);
+          if (data.mode === "video") {
+            $("app-eyebrow").textContent = "LED studio / vídeo";
+            $("app-title").textContent = "Player de vídeo";
+            $("app-description").textContent = data.video?.connected
+              ? "Escolha o momento do vídeo que será exibido nos LEDs."
+              : "Explore o vídeo e escolha momentos sem conectar o painel.";
+            $("controls").disabled = true;
+            $("refresh").disabled = true;
+            status(data.video?.connected ? "● Vídeo tocando nos LEDs" : "● Prévia sem painel");
+            setTimeout(poll, 250);
+            return;
+          }
+          $("app-eyebrow").textContent = "System audio / LED studio";
+          $("app-title").textContent = "Live palette";
+          $("app-description").textContent = "Shape the colors and motion. Let the music do the rest.";
           $("refresh").disabled = !data.refresh_available;
           $("controls").disabled = false;
           if (!settings) {

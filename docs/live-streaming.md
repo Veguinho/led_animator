@@ -5,11 +5,11 @@
 Run commands from the repository root with the virtual environment active.
 Upload the streaming firmware once and run only one streamer at a time.
 Ctrl+C stops a stream; `--clear-on-exit` also turns off the LEDs.
-The current firmware uses four panels on IO10–IO13 and the existing CH340 USB port.
-All streamers default to `--display-size 32`; use `--display-size 16` only
-with the old single-panel firmware and `--baud 230400`. The launcher and Python commands
-default to 20 FPS to fit full 32×32 frames through the 2,000,000-baud connection.
-Upload the updated live firmware once before using these faster defaults.
+The current streaming firmware uses nine panels as a 48×48 display and the
+existing CH340 USB port. Its default baud rate is 1,500,000. Streamers default
+to `--display-size 48` and 12 FPS; the compressed video path can run the Wex
+clip at 24 FPS. Upload the updated live firmware once to enable compressed
+frames.
 The terminal reports measured FPS and skipped frames every five seconds.
 Acknowledgement timeouts default to 0.2 seconds so an occasional lost reply
 does not pause playback for a full second; retries retain CRC validation and
@@ -23,15 +23,58 @@ ESP32 by USB, and run:
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 stream_arduino.py video_clips/my_video.mp4 --fps 20 --loop
+python3 stream_arduino.py video_clips/my_video.mp4 --fps 24 --loop
 ```
 
 The Mac decodes the MP4 with FFmpeg, center-crops it, converts every selected
-frame to a 32×32 RGB565 image, applies an LED intensity curve, and sends the
-2048-byte frames over CH340/UART at 2,000,000 baud. Pure black switches the LED off; colors near
+frame to a 48×48 RGB565 image, applies an LED intensity curve, and sends
+compressed frames when they are smaller than the original 4,608 bytes. Pure
+black switches the LED off; colors near
 black keep their hue but use progressively less PWM power instead of being
 shown as equally bright colors.
-Direct video playback defaults to 20 FPS, or the source frame rate if lower.
+Direct video playback defaults to 12 FPS, or the source frame rate if lower.
+At 48×48, each LED and the total scene brightness are capped, and sudden
+whole-frame light changes are eased. The streamer also enables a matching
+per-pixel limit in firmware, applied after decompression. Run the full Wex
+video at the measured 24 FPS setting with:
+
+```bash
+python3 stream_arduino.py 'wex.muzik PARTAE.mp4' --fps 24 --clear-on-exit
+```
+
+The player opens the local control app at `http://127.0.0.1:8765/#video`.
+In the **Video** tab, drag the timeline or enter `MM:SS` / `HH:MM:SS` and
+choose **Play from here**. **Start over** returns to the beginning. Seeking
+restarts FFmpeg at the selected point while keeping the LED serial connection
+open. To begin at a specific point from the command line, add `--start 600`
+for 10:00. Add `--loop` to repeat the complete video; `--no-browser` keeps the
+app available without opening a browser window.
+
+To explore the complete video without the LED board connected, run:
+
+```bash
+.venv/bin/python video_app.py 'wex.muzik PARTAE.mp4'
+```
+
+The same Video tab plays a browser preview and supports seeking without opening
+the serial port. Stop this preview app with Ctrl+C before starting live LED
+streaming on the same controls port.
+
+For repeatable camera comparisons, make a 60-second 48×48 clip from the
+beginning and loop it at 24 FPS:
+
+```bash
+ffmpeg -y -i 'wex.muzik PARTAE.mp4' -t 60 \
+  -vf 'crop=1080:1080:420:0,scale=48:48:flags=area,fps=24' \
+  -an -c:v libx264 -preset veryfast -crf 10 -pix_fmt yuv444p \
+  .build/mp4-cache/wex-first-minute-48x48-24fps.mp4
+python3 stream_arduino.py .build/mp4-cache/wex-first-minute-48x48-24fps.mp4 \
+  --fps 24 --loop --clear-on-exit
+```
+
+Use `--no-flash-limit` only when the unmodified source brightness is wanted.
+`--no-compression` retains compatibility with older streaming firmware, though
+uncompressed 48×48 frames may fall below 24 FPS.
 Nothing is written to a generated `.h` file. With the default `--port auto`,
 the streamer ignores Bluetooth devices and waits up to 30 seconds for a USB
 serial board, so it can be started before disconnecting and reconnecting the
@@ -42,7 +85,7 @@ select the board explicitly:
 ```bash
 python3 stream_arduino.py --list-ports
 python3 stream_arduino.py video_clips/my_video.mp4 \
-  --port /dev/cu.usbserial-1420 --fps 20 --loop
+  --port /dev/cu.usbserial-1420 --fps 24 --loop
 ```
 
 The default `--led-gamma 2.2` gives dark pixels a strong intensity falloff.
@@ -296,7 +339,6 @@ There is no automatic brightness cycle or peak normalization. The final
 output stage uses a 0.15-second rise and 0.30-second fall; it does not boost dim
 frames. Beats appear quickly while the gentler release avoids abrupt flashes.
 Audio-reactive effects still follow the music and fade in silence.
-The firmware brightness ceiling is 72/255, a 12.5% increase over the previous
-64/255 scale for both dim and bright pixels; black stays off. These percentages
+The firmware output scale is 60/255; black stays off. These percentages
 are software levels, not a measurement of physical light output. This limit
 cannot prevent flashes caused by corrupted LED signals or faulty wiring.

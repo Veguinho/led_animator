@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
+from video_controls import VideoPlaybackControls
+
 
 PRESETS = {
     "rainbow": ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"],
@@ -195,12 +197,21 @@ class PaletteServer:
     def __init__(
         self, controls: PaletteControls, port: int = 8765,
         on_refresh: Callable[[], None] | None = None,
+        video_controls: VideoPlaybackControls | None = None,
+        video_path: Path | None = None,
     ) -> None:
+        if video_path is not None and not video_path.is_file():
+            raise ValueError(f"video does not exist: {video_path}")
         page = Path(__file__).with_name("audio_palette_controls.html").read_bytes()
         session = uuid.uuid4().hex
 
         def state() -> dict:
-            return controls.state() | {"session": session, "refresh_available": on_refresh is not None}
+            return controls.state() | {
+                "session": session, "refresh_available": on_refresh is not None,
+                "mode": "video" if video_controls is not None else "audio",
+                "video": video_controls.state() if video_controls is not None else None,
+                "video_file_available": video_path is not None,
+            }
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:
@@ -218,16 +229,71 @@ class PaletteServer:
             def json_response(self, status: int, value: dict) -> None:
                 self.respond(status, json.dumps(value).encode(), "application/json")
 
+            def serve_video(self, *, head_only: bool = False) -> None:
+                if video_path is None:
+                    self.json_response(404, {"error": "no video file is available"})
+                    return
+                size = video_path.stat().st_size
+                first, last = 0, size - 1
+                range_header = self.headers.get("Range")
+                if range_header:
+                    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+                    if match and (match[1] or match[2]):
+                        if match[1]:
+                            first = int(match[1])
+                            last = min(int(match[2]), size - 1) if match[2] else size - 1
+                        else:
+                            length = int(match[2])
+                            first = max(0, size - length)
+                    if not match or (not match[1] and not match[2]) or first > last or first >= size:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{size}")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                self.send_response(206 if range_header else 200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(last - first + 1))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "no-store")
+                if range_header:
+                    self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
+                self.end_headers()
+                if head_only:
+                    return
+                try:
+                    with video_path.open("rb") as source:
+                        source.seek(first)
+                        remaining = last - first + 1
+                        while remaining:
+                            chunk = source.read(min(256 * 1024, remaining))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
             def do_GET(self) -> None:
                 if self.path == "/":
                     self.respond(200, page, "text/html; charset=utf-8")
                 elif self.path == "/api/state":
                     self.json_response(200, state())
+                elif self.path == "/api/video/file":
+                    self.serve_video()
                 else:
                     self.json_response(404, {"error": "not found"})
 
+            def do_HEAD(self) -> None:
+                if self.path == "/api/video/file":
+                    self.serve_video(head_only=True)
+                else:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
             def do_POST(self) -> None:
-                if self.path not in ("/api/palette", "/api/refresh"):
+                if self.path not in ("/api/palette", "/api/refresh", "/api/video/seek"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
@@ -246,6 +312,13 @@ class PaletteServer:
                     if self.path == "/api/refresh":
                         if payload != {}:
                             raise ValueError("refresh expects an empty JSON object")
+                    elif self.path == "/api/video/seek":
+                        if video_controls is None:
+                            self.json_response(503, {"error": "video player is not running"})
+                            return
+                        if not isinstance(payload, dict) or payload.keys() != {"seconds"}:
+                            raise ValueError("seek expects a video time in seconds")
+                        video_state = video_controls.seek(payload["seconds"])
                     else:
                         controls.update(payload)
                 except (ValueError, UnicodeError) as exc:
@@ -261,6 +334,9 @@ class PaletteServer:
                     self.json_response(202, {"restarting": True, "session": session})
                     self.wfile.flush()
                     on_refresh()
+                    return
+                if self.path == "/api/video/seek":
+                    self.json_response(200, {"video": video_state})
                     return
                 self.json_response(200, state())
 

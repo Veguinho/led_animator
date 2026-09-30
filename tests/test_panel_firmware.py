@@ -38,20 +38,22 @@ template<typename TIMING> int makeClockless(int pin) { return pin; }
 struct ChannelConfig {
   int pin;
   span<CRGB> pixels;
-  ChannelConfig(int pin, span<CRGB> pixels, int, ChannelOptions): pin(pin), pixels(pixels) {}
+  Bus bus;
+  ChannelConfig(int pin, span<CRGB> pixels, int, ChannelOptions options):
+      pin(pin), pixels(pixels), bus(options.mBus) {}
 };
 }
 struct FakeLED {
-  struct Lane { int pin; CRGB *data; int length; std::vector<CRGB> snapshot; };
+  struct Lane { int pin; CRGB *data; int length; fl::Bus bus; std::vector<CRGB> snapshot; };
   std::vector<Lane> lanes;
   bool inFlight = false;
   int shows = 0, brightness = 255, dither = 1;
   template<int CHIPSET, int PIN, int ORDER> void addLeds(CRGB *data, int count) {
-    lanes.push_back({PIN, data, count, {}});
+    lanes.push_back({PIN, data, count, fl::Bus::RMT, {}});
   }
   template<fl::Bus BUS> void setExclusiveDriver() {}
   void add(const fl::ChannelConfig &config) {
-    lanes.push_back({config.pin, config.pixels.data, int(config.pixels.size), {}});
+    lanes.push_back({config.pin, config.pixels.data, int(config.pixels.size), config.bus, {}});
   }
   void setBrightness(int value) { brightness = value; }
   void setDither(int value) { dither = value; }
@@ -87,7 +89,7 @@ struct FakeSerial {
   size_t cursor = 0, rxSize = 0;
   bool receivedDuringDMA = false;
   void setRxBufferSize(size_t size) { rxSize = size; }
-  void begin(uint32_t baud) { assert(baud == 2000000); }
+  void begin(uint32_t baud) { assert(baud == 1500000); }
   void setTimeout(int) {}
   int available() { return incoming.size() - cursor; }
   int read() { return incoming[cursor++]; }
@@ -158,6 +160,9 @@ int main() {
   assert(physicalIndex(0,47) == 767 && physicalIndex(16,47) == 1535);
   assert(physicalIndex(47,47) == 2288);
   assert(payloadCrc32(reinterpret_cast<const uint8_t *>("123456789"),9) == 0xcbf43926);
+  // FastLED's default model counts 1 mA idle per pixel. The power budget
+  // must exceed the 48x48 panel's idle draw or dense frames collapse.
+  assert(MAX_POWER_MILLIAMPS > NUM_LEDS);
 
   // Every possible incoming RGB565 color is attenuated, never boosted.
   for (uint32_t value=0; value<65536; ++value) {
@@ -171,6 +176,8 @@ int main() {
   const int expectedPins[] = {11, 10, 9, 13, 12, 20, 46, 17, 18};
   for (int panel=0; panel<9; ++panel) {
     assert(FastLED.lanes[panel].pin == expectedPins[panel]);
+    assert(FastLED.lanes[panel].bus == ((expectedPins[panel] == 9 || expectedPins[panel] == 10)
+        ? fl::Bus::RMT : fl::Bus::LCD_CLOCKLESS));
     assert(FastLED.lanes[panel].data == leds+panel*256);
     assert(FastLED.lanes[panel].length == 256);
   }
@@ -192,9 +199,9 @@ int main() {
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
   assert(!FastLED.inFlight);
-  assert(leds[255].r == 18 && leds[256].g == 18);
-  assert(leds[768].b == 18);
-  assert(leds[1024].r == 5 && leds[1024].g == 5 && leds[1024].b == 5);
+  assert(leds[255].r == 15 && leds[256].g == 15);
+  assert(leds[768].b == 15);
+  assert(leds[1024].r == 4 && leds[1024].g == 4 && leds[1024].b == 4);
   const int shows = FastLED.shows;
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
@@ -211,7 +218,7 @@ int main() {
   request(PACKET_FRAME, 2, frame);
   response(STATUS_ACK, 0, 2);
   assert(!Serial0.receivedDuringDMA && !FastLED.inFlight);
-  assert(leds[255].b == 18 && leds[255].r == 0);
+  assert(leds[255].b == 15 && leds[255].r == 0);
 
   request(PACKET_CLEAR, 99, {});
   response(STATUS_ACK, 0, 99);
@@ -219,13 +226,40 @@ int main() {
   for (auto &led : leds) assert(led.r == 0 && led.g == 0 && led.b == 0);
   request(PACKET_FRAME, 2, frame);  // Same sequence can redraw after CLEAR.
   response(STATUS_ACK, 0, 2);
-  assert(!FastLED.inFlight && leds[255].b == 18);
+  assert(!FastLED.inFlight && leds[255].b == 15);
   // A full-white packet cannot bypass limits, even if global settings changed.
   FastLED.setBrightness(255);
   FastLED.setDither(1);
   request(PACKET_FRAME, 3, std::vector<uint8_t>(4608, 255));
   response(STATUS_ACK, 0, 3);
-  for (const auto &color : leds) assert(color.r == 5 && color.g == 5 && color.b == 5);
+  for (const auto &color : leds) assert(color.r == 4 && color.g == 4 && color.b == 4);
+  std::vector<uint8_t> compressed(compressBound(frame.size()));
+  uLongf compressedLength = compressed.size();
+  assert(compress2(compressed.data(), &compressedLength, frame.data(),
+                   frame.size(), 3) == Z_OK);
+  compressed.resize(compressedLength);
+  request(PACKET_COMPRESSED_FRAME, 4, compressed);
+  response(STATUS_ACK, 0, 4);
+  assert(leds[255].b == 15 && leds[255].r == 0);
+  compressed.pop_back();
+  request(PACKET_COMPRESSED_FRAME, 5, compressed);
+  response(STATUS_NAK, ERROR_BAD_LENGTH, 5);
+  request(PACKET_HELLO, 0, {48,48,1,1,0,0,0,0});
+  response(STATUS_READY, 0, 0);
+  std::vector<uint8_t> videoWhite(4608, 255);
+  std::vector<uint8_t> videoCompressed(compressBound(videoWhite.size()));
+  uLongf videoCompressedLength = videoCompressed.size();
+  assert(compress2(videoCompressed.data(), &videoCompressedLength,
+                   videoWhite.data(), videoWhite.size(), 3) == Z_OK);
+  videoCompressed.resize(videoCompressedLength);
+  request(PACKET_COMPRESSED_FRAME, 6, videoCompressed);
+  response(STATUS_ACK, 0, 6);
+  for (const auto &color : leds)
+    assert(int(color.r) + color.g + color.b <= MAX_VIDEO_RGB_TOTAL);
+  request(PACKET_FRAME, 7, videoWhite);
+  response(STATUS_ACK, 0, 7);
+  for (const auto &color : leds)
+    assert(int(color.r) + color.g + color.b <= MAX_VIDEO_RGB_TOTAL);
   showMatrixCoverageTest();  // The startup diagnostic uses the same limiter.
   FastLED.wait();
 }
@@ -244,6 +278,25 @@ class PanelFirmwareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             (temp / "FastLED.h").write_text(FASTLED_STUB)
+            (temp / "miniz.h").write_text(r'''
+#pragma once
+#include <cstddef>
+#include <cstdint>
+#include <zlib.h>
+struct tinfl_decompressor {};
+enum tinfl_status { TINFL_STATUS_FAILED = -1, TINFL_STATUS_DONE = 0 };
+constexpr int TINFL_FLAG_PARSE_ZLIB_HEADER = 1;
+constexpr int TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF = 2;
+inline void tinfl_init(tinfl_decompressor *) {}
+inline tinfl_status tinfl_decompress(tinfl_decompressor *, const uint8_t *input,
+                                    size_t *inputLength, uint8_t *, uint8_t *output,
+                                    size_t *outputLength, int) {
+  uLongf size = *outputLength;
+  int result = uncompress(output, &size, input, *inputLength);
+  *outputLength = size;
+  return result == Z_OK ? TINFL_STATUS_DONE : TINFL_STATUS_FAILED;
+}
+''')
             bus_traits = temp / "platforms/esp/32/drivers/lcd_spi/bus_traits.h"
             bus_traits.parent.mkdir(parents=True)
             bus_traits.write_text("#pragma once\n")
@@ -252,6 +305,6 @@ class PanelFirmwareTests(unittest.TestCase):
                 "c++", "-std=c++17", "-DCONFIG_IDF_TARGET_ESP32S3=1",
                 "-DARDUINO_USB_CDC_ON_BOOT=0", "-DARDUINO_USB_MODE=1",
                 "-I", str(temp), "-I", str(ROOT / "cs2_16x16_player_firmware"),
-                str(temp / "test.cpp"), "-o", str(temp / "test"),
+                str(temp / "test.cpp"), "-lz", "-o", str(temp / "test"),
             ], check=True, capture_output=True, text=True)
             subprocess.run([str(temp / "test")], check=True, capture_output=True)

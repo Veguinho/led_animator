@@ -10,6 +10,7 @@ import numpy as np
 from audio_palette_controls import (
     PaletteControls, PaletteServer, default_settings, make_palette,
 )
+from video_controls import VideoPlaybackControls
 
 
 class PaletteTests(unittest.TestCase):
@@ -116,6 +117,62 @@ class PaletteServerTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, expected)
                 error.exception.close()
                 self.assertEqual(self.controls.state()["revision"], 0)
+
+    def test_video_tab_seeks_only_with_valid_local_time(self):
+        video = VideoPlaybackControls("Wex.mp4", 120.0, 24.0)
+        server = PaletteServer(PaletteControls(), port=0, video_controls=video)
+        server.start()
+        self.addCleanup(server.close)
+        with urlopen(server.url + "/api/state", timeout=2) as response:
+            state = json.load(response)
+        self.assertEqual(state["mode"], "video")
+        self.assertEqual(state["video"]["duration"], 120.0)
+        with urlopen(server.url, timeout=2) as response:
+            self.assertIn(b'id="video-tab"', response.read())
+        seek = Request(
+            server.url + "/api/video/seek", data=b'{"seconds": 65}',
+            headers={"Content-Type": "application/json", "Origin": server.url},
+            method="POST",
+        )
+        with urlopen(seek, timeout=2) as response:
+            self.assertEqual(json.load(response)["video"]["position"], 65.0)
+        self.assertEqual(video.take_seek(), 65.0)
+        for payload in (b'{"seconds": -1}', b'{"seconds": 120}', b'{"seconds": true}'):
+            with self.subTest(payload=payload), self.assertRaises(HTTPError) as error:
+                urlopen(Request(server.url + "/api/video/seek", data=payload,
+                                headers={"Content-Type": "application/json", "Origin": server.url},
+                                method="POST"), timeout=2)
+            self.assertEqual(error.exception.code, 400)
+            error.exception.close()
+
+    def test_offline_video_preview_serves_byte_ranges_and_accepts_seek(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clip = Path(directory) / "preview.mp4"
+            clip.write_bytes(b"0123456789abcdef")
+            video = VideoPlaybackControls("preview.mp4", 12.0, 24.0,
+                                          connected=False)
+            server = PaletteServer(PaletteControls(), port=0,
+                                   video_controls=video, video_path=clip)
+            server.start()
+            try:
+                with urlopen(Request(server.url + "/api/video/file",
+                                     headers={"Range": "bytes=5-9"}), timeout=2) as response:
+                    self.assertEqual(response.status, 206)
+                    self.assertEqual(response.headers["Content-Range"], "bytes 5-9/16")
+                    self.assertEqual(response.read(), b"56789")
+                with urlopen(Request(server.url + "/api/video/file", method="HEAD"), timeout=2) as response:
+                    self.assertEqual(response.headers["Content-Length"], "16")
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(Request(server.url + "/api/video/file",
+                                    headers={"Range": "bytes=99-"}), timeout=2)
+                self.assertEqual(error.exception.code, 416)
+                error.exception.close()
+                video.seek(3)
+                self.assertIsNone(video.take_seek())
+                self.assertFalse(video.state()["connected"])
+                self.assertEqual(video.state()["position"], 3)
+            finally:
+                server.close()
 
 
 if __name__ == "__main__":

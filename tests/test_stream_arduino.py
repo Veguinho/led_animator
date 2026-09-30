@@ -21,6 +21,7 @@ from stream_arduino import (
     read_response,
     resolve_port,
 )
+from video_controls import VideoPlaybackControls
 
 
 class FakeSerial:
@@ -34,6 +35,28 @@ class FakeSerial:
 
 
 class StreamingProtocolTests(unittest.TestCase):
+    def test_video_seek_restarts_decoder_at_requested_time_without_reopening_serial(self):
+        frames_at = mock.Mock(side_effect=lambda second: iter(
+            [bytes([1]) * 512, bytes([2]) * 512] if second == 0
+            else [bytes([3]) * 512]))
+        source = stream_arduino.FrameSource(24, lambda: frames_at(0), 16, frames_at)
+        controls = VideoPlaybackControls("clip.mp4", 60, 24)
+        payloads = []
+
+        def send(_connection, _type, _sequence, payload, *_args):
+            payloads.append(payload)
+            if len(payloads) == 1:
+                controls.seek(5)
+
+        with mock.patch.object(stream_arduino, "exchange_packet", side_effect=send):
+            sent, dropped = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=False, controls=controls,
+            )
+        self.assertEqual((sent, dropped), (2, 0))
+        self.assertEqual(payloads, [bytes([1]) * 512, bytes([3]) * 512])
+        self.assertEqual([call.args[0] for call in frames_at.call_args_list], [0, 5])
+
     def test_live_stream_rebases_after_cpu_stall_without_catchup_burst(self):
         source = stream_arduino.FrameSource(
             10,
@@ -85,6 +108,14 @@ class StreamingProtocolTests(unittest.TestCase):
             (48, 48, 1, 0, 16667),
         )
 
+    def test_video_handshake_enables_firmware_pixel_ceiling(self):
+        connection = mock.Mock()
+        with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
+            stream_arduino.handshake(connection, 24, 1, 3, display_size=48,
+                                     video_mode=True)
+        self.assertEqual(stream_arduino.HELLO.unpack(exchange.call_args.args[3]),
+                         (48, 48, 1, 1, 41667))
+
     def test_existing_effect_pixels_expand_to_three_by_three_blocks(self):
         pixels = np.arange(256, dtype="<u2").reshape(16, 16)
         payload = stream_arduino.resize_rgb565(pixels.tobytes(), 16, 48)
@@ -124,6 +155,95 @@ class StreamingProtocolTests(unittest.TestCase):
             )
         self.assertEqual(result, (1, 0))
         self.assertEqual(len(exchange.call_args.args[3]), 4608)
+
+    def test_compressed_frame_round_trips_and_random_data_falls_back(self):
+        plain = bytes(4608)
+        random = np.random.default_rng(42).integers(0, 256, 4608,
+                                                     dtype=np.uint8).tobytes()
+        source = stream_arduino.FrameSource(24, lambda: iter([plain, random]), 48)
+        with mock.patch.object(stream_arduino, "exchange_packet") as exchange:
+            stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=False, display_size=48, compress=True,
+            )
+        first, second = exchange.call_args_list
+        self.assertEqual(first.args[1], stream_arduino.PACKET_COMPRESSED_FRAME)
+        self.assertEqual(zlib.decompress(first.args[3]), plain)
+        self.assertEqual(second.args[1], PACKET_FRAME)
+        self.assertEqual(second.args[3], random)
+
+    def test_video_flash_limiter_dims_white_highlights_more_than_color(self):
+        frame = np.array([[[255, 255, 255], [0, 0, 255],
+                           [0, 255, 255]]], dtype=np.uint8)
+        result = stream_arduino.limit_video_flash(frame)
+        self.assertLessEqual(int(result[0, 0].sum()), 36)
+        self.assertLessEqual(int(result[0, 1].sum()), 20)
+        self.assertLessEqual(int(result[0, 2].sum()), 24)
+        self.assertGreater(int(result[0, 1, 2]), int(result[0, 0, 2]))
+
+    def test_sustained_bright_scene_stays_below_scene_ceiling(self):
+        limiter = stream_arduino.VideoFlashLimiter(24)
+        white = np.full((48, 48, 3), 255, dtype=np.uint8)
+        for _ in range(100):
+            result = limiter.apply(white)
+        self.assertLessEqual(float(result.mean()), 12.0)
+        self.assertGreater(float(result.mean()), 0.0)
+
+    def test_changing_bright_scenes_keep_lower_ceiling(self):
+        limiter = stream_arduino.VideoFlashLimiter(24)
+        white = np.full((48, 48, 3), 255, dtype=np.uint8)
+        cyan = white.copy()
+        cyan[..., 0] = 0
+        for index in range(100):
+            result = limiter.apply(white if index % 2 else cyan)
+        self.assertLessEqual(float(result.mean()), 8.0)
+
+    def test_video_loop_preserves_brightness_ramp_between_passes(self):
+        white = np.full((48, 48, 3), 255, dtype=np.uint8)
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(stream_arduino, "probe_video",
+                              return_value=VideoInfo(48, 48, 24)),
+            mock.patch.object(stream_arduino, "iter_square_video_frames",
+                              side_effect=lambda *_args: iter([white])),
+        ):
+            source = open_video(Path("loop.mp4"), target_fps=24, size=48,
+                                flash_limit=True)
+            first = next(source.iter_frames())
+            for _ in range(25):
+                last = next(source.iter_frames())
+        self.assertEqual(np.count_nonzero(np.frombuffer(first, dtype="<u2")), 0)
+        self.assertGreater(np.count_nonzero(np.frombuffer(last, dtype="<u2")), 0)
+
+    def test_rgb565_video_ceiling_limits_actual_firmware_pwm(self):
+        frame = np.array([[[255, 255, 255], [0, 255, 255],
+                           [0, 0, 255], [255, 0, 0]]], dtype=np.uint8)
+        limited = stream_arduino.limit_video_flash(frame)
+        payload = stream_arduino.encode_limited_video_rgb565(limited)
+        packed = np.frombuffer(payload, dtype="<u2")
+        red5, green6, blue5 = (packed >> 11) & 31, (packed >> 5) & 63, packed & 31
+        pwm = (((red5 << 3 | red5 >> 2) * 60 // 255)
+               + ((green6 << 2 | green6 >> 4) * 60 // 255)
+               + ((blue5 << 3 | blue5 >> 2) * 60 // 255))
+        self.assertTrue(np.all(pwm <= 4))
+        self.assertGreater(int(pwm[2]), 0)
+
+    def test_video_flash_limiter_eases_frame_spikes_without_blurring_motion(self):
+        limiter = stream_arduino.VideoFlashLimiter(24)
+        black = np.zeros((2, 2, 3), dtype=np.uint8)
+        white = np.full((2, 2, 3), 255, dtype=np.uint8)
+        limiter.apply(black)
+        spike = limiter.apply(white)
+        self.assertLessEqual(int(spike.mean()), 2)
+        limiter.apply(black)
+        for _ in range(20):
+            steady = limiter.apply(white)
+        self.assertGreater(int(steady.mean()), int(spike.mean()))
+        moving = white.copy()
+        moving[:, 0] = 0
+        shifted = np.roll(moving, 1, axis=1)
+        np.testing.assert_array_equal(limiter.apply(shifted),
+                                      stream_arduino.limit_video_flash(shifted))
 
     def test_32_pixel_handshake(self):
         connection = mock.Mock()

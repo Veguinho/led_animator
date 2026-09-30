@@ -123,8 +123,12 @@ def iter_square_video_frames(
     path: Path,
     info: VideoInfo,
     output_size: int | None = None,
+    *,
+    start_seconds: float = 0.0,
 ) -> Iterator[np.ndarray]:
     """Decode center-cropped RGB frames, optionally scaled before piping."""
+    if not math.isfinite(start_seconds) or start_seconds < 0:
+        raise ValueError("start_seconds must be a nonnegative finite number")
     ffmpeg = _require_program("ffmpeg")
     side = min(info.width, info.height)
     x = (info.width - side) // 2
@@ -141,6 +145,10 @@ def iter_square_video_frames(
         "-v",
         "error",
         "-noautorotate",
+    ]
+    if start_seconds:
+        command.extend(["-ss", f"{start_seconds:.6f}"])
+    command.extend([
         "-i",
         str(path),
         "-map",
@@ -153,7 +161,7 @@ def iter_square_video_frames(
         "-pix_fmt",
         "rgb24",
         "pipe:1",
-    ]
+    ])
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None
     assert process.stderr is not None
