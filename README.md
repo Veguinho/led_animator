@@ -3,7 +3,8 @@
 Live lava, audio-reactive waves, and video playback on a **48×48 RGB LED
 screen** built from nine 16×16 panels. Python creates the frames; an ESP32-S3
 drives each panel independently and receives frames through the existing CH340 USB
-connection. The compressed 48×48 video path has been measured at 24 FPS.
+connection. The compressed 48×48 video path plays Wex at its original
+29.97 FPS.
 The live firmware routes IO9 and IO10 through RMT and the other seven panels
 through LCD_CAM. Preloaded video uses a separate firmware. The live video
 player opens a local **Video** tab at `http://127.0.0.1:8765/#video` for

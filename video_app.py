@@ -17,7 +17,8 @@ from video_controls import VideoPlaybackControls
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Preview and seek a video without the LED board")
     parser.add_argument("video", type=Path, help="local MP4 file")
-    parser.add_argument("--fps", type=float, default=24.0, help="intended LED playback rate")
+    parser.add_argument("--fps", type=float, default=None,
+                        help="intended LED playback rate (default: video's original frame rate)")
     parser.add_argument("--start", type=float, default=0.0, help="initial time in seconds")
     parser.add_argument("--controls-port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
@@ -26,11 +27,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"video does not exist: {args.video}")
     if not 0 <= args.controls_port <= 65535:
         parser.error("--controls-port must be between 0 and 65535")
-    if not 0 < args.fps <= 120:
+    if args.fps is not None and not 0 < args.fps <= 120:
         parser.error("--fps must be between 0 and 120")
 
     duration = probe_video_duration(args.video)
-    fps = min(args.fps, probe_video(args.video).fps)
+    source_fps = probe_video(args.video).fps
+    fps = min(args.fps, source_fps) if args.fps is not None else source_fps
     controls = VideoPlaybackControls(args.video.name, duration, fps, args.start,
                                      connected=False)
     server = PaletteServer(PaletteControls(), args.controls_port,

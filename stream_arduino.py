@@ -577,8 +577,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fps",
         type=float,
-        default=DEFAULT_STREAM_FPS,
-        help="maximum streaming FPS (default: 12 with per-lane 48x48 protection)",
+        default=None,
+        help="maximum streaming FPS (default: video's original frame rate)",
     )
     parser.add_argument(
         "--led-gamma",

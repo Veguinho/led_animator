@@ -139,7 +139,12 @@ void showLimitedFrame(bool videoFrame = false) {
   FastLED.setBrightness(DRIVER_BRIGHTNESS);
   FastLED.setDither(0);
   FastLED.show();
-  FastLED.wait();
+  // Video ACK can follow queueing the transfer: the next packet is received
+  // into separate storage, and drawFrame waits before changing leds again.
+  // This overlaps UART reception with LED output at the source frame rate.
+  if (!videoFrame) {
+    FastLED.wait();
+  }
 }
 
 void showMatrixCoverageTest() {
@@ -202,7 +207,8 @@ void drawFrame(const uint8_t *payload) {
     const uint8_t column = logicalIndex % WIDTH;
     leds[physicalIndex(row, column)] = decodeRgb565(color);
   }
-  // Finish the limited LED transfer before ACK permits another frame.
+  // In video mode, the next packet may arrive during this LED transfer;
+  // the wait at the top protects the buffer before the next frame replaces it.
   showLimitedFrame(videoMode);
 }
 

@@ -7,7 +7,7 @@ WS2812B panels. The ESP32-S3 drives seven parallel LCD_CAM lanes and two RMT
 lanes (IO9 and IO10). The Mac sends
 frames over the controller's existing CH340 USB-to-UART port at 1,500,000 baud;
 an external regulated 5 V supply powers the LEDs. Compressed video has been
-measured at 24 FPS.
+measured at the Wex video's original 29.97 FPS.
 
 ## Panel placement and wiring
 
@@ -40,7 +40,8 @@ The attached controller appears as `/dev/cu.usbserial-1420` on this Mac
 native USB connector or board replacement is needed. IO20 is one of the nine
 panel data outputs. The uncompressed 48×48 payload is 4,608 bytes, which takes
 about 30.8 ms on the wire at 1,500,000 baud including packet framing.
-Compressed frames are normally much smaller and leave room for 24 FPS playback.
+Compressed frames are normally much smaller and leave room for the Wex video's
+29.97 FPS playback.
 
 The separate preloaded-video firmware negotiates **2,000,000 baud** after
 booting at 230400. Measured checksummed upload throughput is about 129 KB/s;
@@ -130,9 +131,10 @@ the host schedules frame transmission with `--fps`.
 
 The RGB565 receive buffer holds one complete frame for CRC verification.
 The firmware waits before changing display data, maps the image into nine
-panel buffers, submits it through the assigned drivers, and waits for both to finish.
-A frame ACK means **transmission completed**, so the host starts the next
-frame after LED output is finished.
+panel buffers, and submits it through the assigned drivers.
+A video frame ACK means its LED transfer has started. The firmware receives
+the next packet into a separate buffer while that transfer runs, then waits
+before replacing LED pixels. Audio frame ACKs still follow completed output.
 Retries with the same sequence number are acknowledged without redisplay.
 CLEAR waits for transmission to finish, blanks every panel, waits for that
 transfer, and then acknowledges; it also resets duplicate-frame tracking.
@@ -141,7 +143,7 @@ The UART receive queue holds two full packets. Truncated or bad-CRC packets do
 not replace the display. All FastLED calls run on the Arduino loop task;
 The UART hardware can queue incoming bytes while LED output completes.
 
-At 24 FPS, uncompressed RGB565 payloads require 110,592 bytes/second;
+At 29.97 FPS, uncompressed RGB565 payloads require about 138,102 bytes/second;
 compression reduces the typical Wex clip well below that. Each LED output carries
 256 pixels. Serial reception, LED transmission and rendering together
 determine the sustainable frame rate.

@@ -6,9 +6,9 @@ Run commands from the repository root with the virtual environment active.
 Upload the streaming firmware once and run only one streamer at a time.
 Ctrl+C stops a stream; `--clear-on-exit` also turns off the LEDs.
 The current streaming firmware uses nine panels as a 48×48 display and the
-existing CH340 USB port. Its default baud rate is 1,500,000. Streamers default
-to `--display-size 48` and 12 FPS; the compressed video path can run the Wex
-clip at 24 FPS. Upload the updated live firmware once to enable compressed
+existing CH340 USB port. Its default baud rate is 1,500,000. The video streamer
+defaults to `--display-size 48` and the source video's frame rate; the Wex clip
+runs at 29.97 FPS. Upload the updated live firmware once to enable compressed
 frames.
 The terminal reports measured FPS and skipped frames every five seconds.
 Acknowledgement timeouts default to 0.2 seconds so an occasional lost reply
@@ -23,7 +23,7 @@ ESP32 by USB, and run:
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 stream_arduino.py video_clips/my_video.mp4 --fps 24 --loop
+python3 stream_arduino.py video_clips/my_video.mp4 --loop
 ```
 
 The Mac decodes the MP4 with FFmpeg, center-crops it, converts every selected
@@ -32,14 +32,14 @@ compressed frames when they are smaller than the original 4,608 bytes. Pure
 black switches the LED off; colors near
 black keep their hue but use progressively less PWM power instead of being
 shown as equally bright colors.
-Direct video playback defaults to 12 FPS, or the source frame rate if lower.
+Direct video playback defaults to the source frame rate. Pass `--fps` to cap it.
 At 48×48, each LED and the total scene brightness are capped, and sudden
 whole-frame light changes are eased. The streamer also enables a matching
 per-pixel limit in firmware, applied after decompression. Run the full Wex
-video at the measured 24 FPS setting with:
+video at its original 29.97 FPS with:
 
 ```bash
-python3 stream_arduino.py 'wex.muzik PARTAE.mp4' --fps 24 --clear-on-exit
+python3 stream_arduino.py 'wex.muzik PARTAE.square.mp4' --clear-on-exit
 ```
 
 The player opens the local control app at `http://127.0.0.1:8765/#video`.
@@ -74,7 +74,7 @@ python3 stream_arduino.py .build/mp4-cache/wex-first-minute-48x48-24fps.mp4 \
 
 Use `--no-flash-limit` only when the unmodified source brightness is wanted.
 `--no-compression` retains compatibility with older streaming firmware, though
-uncompressed 48×48 frames may fall below 24 FPS.
+uncompressed 48×48 frames may fall below the source frame rate.
 Nothing is written to a generated `.h` file. With the default `--port auto`,
 the streamer ignores Bluetooth devices and waits up to 30 seconds for a USB
 serial board, so it can be started before disconnecting and reconnecting the

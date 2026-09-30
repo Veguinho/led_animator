@@ -35,6 +35,17 @@ class FakeSerial:
 
 
 class StreamingProtocolTests(unittest.TestCase):
+    def test_default_video_rate_matches_source(self):
+        args = stream_arduino.build_parser().parse_args(["sample.mp4"])
+        self.assertIsNone(args.fps)
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(stream_arduino, "probe_video",
+                              return_value=VideoInfo(1080, 1080, 30000 / 1001)),
+        ):
+            source = open_video(Path("sample.mp4"), args.fps)
+        self.assertAlmostEqual(source.fps, 30000 / 1001)
+
     def test_video_seek_restarts_decoder_at_requested_time_without_reopening_serial(self):
         frames_at = mock.Mock(side_effect=lambda second: iter(
             [bytes([1]) * 512, bytes([2]) * 512] if second == 0

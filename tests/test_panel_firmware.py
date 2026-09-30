@@ -128,7 +128,6 @@ void request(uint8_t type, uint32_t sequence, std::vector<uint8_t> payload,
   loop();
 }
 void response(uint8_t status, uint16_t detail, uint32_t sequence) {
-  assert(!FastLED.inFlight);  // Every protocol response follows a completed transfer.
   assert(Serial0.outgoing.size() == 12);
   assert(memcmp(Serial0.outgoing.data(), "LEDR", 4) == 0);
   assert(Serial0.outgoing[5] == status);
@@ -254,12 +253,20 @@ int main() {
   videoCompressed.resize(videoCompressedLength);
   request(PACKET_COMPRESSED_FRAME, 6, videoCompressed);
   response(STATUS_ACK, 0, 6);
+  assert(FastLED.inFlight);
   for (const auto &color : leds)
     assert(int(color.r) + color.g + color.b <= MAX_VIDEO_RGB_TOTAL);
+  Serial0.receivedDuringDMA = false;
   request(PACKET_FRAME, 7, videoWhite);
   response(STATUS_ACK, 0, 7);
+  assert(Serial0.receivedDuringDMA && FastLED.inFlight);
   for (const auto &color : leds)
     assert(int(color.r) + color.g + color.b <= MAX_VIDEO_RGB_TOTAL);
+  // Receiving during LED output must never change its in-flight pixel buffer.
+  request(PACKET_FRAME, 8, std::vector<uint8_t>(4608, 0));
+  response(STATUS_ACK, 0, 8);
+  assert(FastLED.inFlight);
+  for (const auto &color : leds) assert(color.r == 0 && color.g == 0 && color.b == 0);
   showMatrixCoverageTest();  // The startup diagnostic uses the same limiter.
   FastLED.wait();
 }
