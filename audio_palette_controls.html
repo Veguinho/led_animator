@@ -477,7 +477,7 @@
             <h2>Panel preview</h2>
             <span class="eyebrow" id="preview-size">32 × 32</span>
           </div>
-          <p>The live frame sent to your LEDs.</p>
+          <p id="preview-description">The live frame sent to your LEDs.</p>
           <canvas
             id="preview"
             width="384"
@@ -491,7 +491,7 @@
             aria-label="Current color palette"
           ></div>
           <div class="axis"><span>Left edge</span><span>Right edge</span></div>
-          <p class="note">
+          <p id="preview-note" class="note">
             The preview stays dark when audio is silent. Brightness adjusts the
             palette; the music still controls each note’s glow.
           </p>
@@ -504,10 +504,11 @@
           <div class="eyebrow">48 × 48 LED player</div>
           <h2 id="video-name">Player de vídeo</h2>
           <p id="video-help">Inicie um vídeo para escolher de onde ele será reproduzido.</p>
+          <p id="video-audio-status" class="note" role="status">Aguardando áudio do Mac.</p>
           <div id="video-preview-wrap" hidden>
             <video id="video-preview" class="video-preview" controls preload="metadata" playsinline
               aria-label="Prévia do vídeo"></video>
-            <p class="note">Explore o trecho aqui ou na linha do tempo. Com o painel conectado, o mesmo controle muda os LEDs.</p>
+            <p class="note">Esta prévia mostra o arquivo original. A textura com a paleta ao vivo aparece nos LEDs e na aba Audio palette.</p>
           </div>
           <fieldset id="video-controls" disabled>
             <label for="video-progress" class="range-label">Escolha o momento</label>
@@ -624,8 +625,14 @@
         }
         $("video-name").textContent = video.name;
         $("video-help").textContent = video.connected
-          ? `Reproduzindo na matriz de LEDs a ${video.fps} FPS.`
+          ? `Reproduzindo na matriz de LEDs a ${video.fps.toFixed(2)} FPS.`
           : "Prévia no navegador; o painel de LEDs está desconectado.";
+        const reactive = video.audio_reactive;
+        $("video-audio-status").textContent = !reactive?.enabled
+          ? "Textura de áudio ao vivo indisponível nesta prévia."
+          : reactive.audible
+            ? `Áudio do Mac ativo · energia ${Math.round(reactive.energy * 100)}% · saturação ${Math.round(reactive.saturation * 100)}%.`
+            : "Aguardando música no áudio do Mac · vídeo em cores calmas.";
         $("video-progress").max = Math.max(0, video.duration - 1 / video.fps);
         if (!videoEditing) {
           const position = !video.connected && videoPreview.readyState >= 1
@@ -709,7 +716,12 @@
         context.clearRect(0, 0, canvas.width, canvas.height);
         data.frame.forEach((row, y) =>
           row.forEach((rgb, x) => {
-            context.fillStyle = `rgb(${rgb.map((v) => Math.max(12, v)).join(",")})`;
+            context.fillStyle = `rgb(${rgb.map((v) => videoConnected
+              ? Math.min(255, v * 12) : Math.max(12, v)).join(",")})`;
+            if (videoConnected) {
+              context.fillRect(x * cellWidth, y * cellHeight, cellWidth, cellHeight);
+              return;
+            }
             context.beginPath();
             context.arc(
               (x + 0.5) * cellWidth, (y + 0.5) * cellHeight,
@@ -896,10 +908,10 @@
       }
       $("reset").addEventListener("click", () => {
         settings = {
-          preset: "custom",
-          colors: ["#ff0000"],
+          preset: videoConnected ? "adaptive" : "custom",
+          colors: videoConnected ? presets.adaptive.slice() : ["#ff0000"],
           blend: "gradient",
-          brightness: 16 / 255,
+          brightness: videoConnected ? 1 : 16 / 255,
           saturation: 1,
           reverse: false,
           slowdown: 20,
@@ -953,31 +965,35 @@
           if (refreshing) { setTimeout(poll, 250); return; }
           if (activeTab === null) setTab(location.hash === "#audio" ? "audio"
             : data.mode === "video" || location.hash === "#video" ? "video" : "audio");
-          $("audio-tab").disabled = data.mode === "video";
+          const videoMode = data.mode === "video";
+          const reactiveVideo = videoMode && Boolean(data.video?.audio_reactive?.enabled);
+          $("audio-tab").disabled = videoMode && !reactiveVideo;
           renderVideo(data.video, data.video_file_available);
-          if (data.mode === "video") {
+          if (videoMode) {
             $("app-eyebrow").textContent = "LED studio / vídeo";
             $("app-title").textContent = "Player de vídeo";
             $("app-description").textContent = data.video?.connected
-              ? "Escolha o momento do vídeo que será exibido nos LEDs."
+              ? "Escolha o momento do vídeo e ajuste a paleta na aba Audio palette."
               : "Explore o vídeo e escolha momentos sem conectar o painel.";
-            $("controls").disabled = true;
-            $("refresh").disabled = true;
-            status(data.video?.connected ? "● Vídeo tocando nos LEDs" : "● Prévia sem painel");
-            setTimeout(poll, 250);
-            return;
+            $("preview-description").textContent = "Textura de vídeo com cores e saturação do áudio ao vivo.";
+            $("preview-note").textContent = "A prévia amplia os valores de brilho para mostrar os detalhes; os limites de segurança continuam ativos nos LEDs.";
+            $("slowdown-help").textContent = "Suaviza a resposta das cores à música. A velocidade do vídeo não muda.";
+          } else {
+            $("app-eyebrow").textContent = "System audio / LED studio";
+            $("app-title").textContent = "Live palette";
+            $("app-description").textContent = "Shape the colors and motion. Let the music do the rest.";
+            $("preview-description").textContent = "The live frame sent to your LEDs.";
+            $("preview-note").textContent = "The preview stays dark when audio is silent. Brightness adjusts the palette; the music still controls each note’s glow.";
+            $("slowdown-help").textContent = "Slide right to slow the motion, left to speed it up. Frames blend smoothly in between. Wave mode adds thicker sine and cosine curves.";
           }
-          $("app-eyebrow").textContent = "System audio / LED studio";
-          $("app-title").textContent = "Live palette";
-          $("app-description").textContent = "Shape the colors and motion. Let the music do the rest.";
-          $("refresh").disabled = !data.refresh_available;
-          $("controls").disabled = false;
+          $("refresh").disabled = videoMode || !data.refresh_available;
+          $("controls").disabled = videoMode && !reactiveVideo;
           if (!settings) {
             presets = data.presets;
             settings = data.settings;
             buildPresets();
             renderSettings();
-            $("controls").disabled = false;
+            $("controls").disabled = videoMode && !reactiveVideo;
           }
           if (!pending && !sending && version === editVersion) {
             if (revision !== data.revision) {
@@ -987,14 +1003,16 @@
             }
             draw(data);
             if (refreshError) status(refreshError, "error");
-            else status("● Live · controls synced");
+            else status(videoMode
+              ? data.video?.connected ? "● Vídeo e áudio ao vivo nos LEDs" : "● Prévia sem painel"
+              : "● Live · controls synced");
           }
           if (pending && !sending) flush();
         } catch (error) {
           status("Disconnected · waiting for visualizer", "error");
           $("refresh").disabled = true;
         }
-        setTimeout(poll, 33);
+        setTimeout(poll, activeTab === "video" ? 250 : 33);
       }
       poll();
     </script>

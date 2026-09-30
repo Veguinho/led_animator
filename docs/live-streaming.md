@@ -42,6 +42,16 @@ video at its original 29.97 FPS with:
 python3 stream_arduino.py 'wex.muzik PARTAE.square.mp4' --clear-on-exit
 ```
 
+The live video player captures Mac system audio. Its **Audio palette** tab
+controls the colors mapped onto the video while the original image texture
+remains visible. The adaptive preset starts with cooler, softer colors during
+quiet passages and becomes brighter and more saturated as the music grows.
+The player loads and saves the same `.build/audio-palette.json` settings used
+by the live audio visualizer, so palette changes carry between modes.
+The MP4 has no audio track, so play music through the Mac for this response.
+The hardware brightness and flash limits still apply after the color mapping.
+Use `--no-audio-reactive` to play the video's original colors.
+
 The player opens the local control app at `http://127.0.0.1:8765/#video`.
 In the **Video** tab, drag the timeline or enter `MM:SS` / `HH:MM:SS` and
 choose **Play from here**. **Start over** returns to the beginning. Seeking

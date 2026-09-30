@@ -12,7 +12,6 @@ import sys
 import threading
 import time
 import webbrowser
-from collections import deque
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -20,6 +19,7 @@ import numpy as np
 from brightness_envelope import BrightnessEnvelope
 
 from audio_palette_controls import DEFAULT_SLOWDOWN, PaletteControls, PaletteServer, default_settings, make_adaptive_palette, make_palette, validate_slowdown
+from audio_energy import AdaptiveAudioEnergy
 from export_arduino import encode_rgb565
 from stream_arduino import (
     DEFAULT_PORT_WAIT,
@@ -262,11 +262,7 @@ class AudioVisualizer:
         self._adaptive = self._settings["preset"] == "adaptive"
         if not self._adaptive:
             self.palette = make_palette(self._settings, size=self.size)
-        self._energy = 0.0
-        self._colorful = 0.0
-        self._energy_history: deque[tuple[float, float, float]] = deque()
-        self._energy_clock = 0.0
-        self._song_levels: np.ndarray | None = None
+        self._adaptive_energy = AdaptiveAudioEnergy(SAMPLE_RATE, FFT_SIZE)
         self._rainbow_phase = 0.0
         self._last_color_time: float | None = None
         self._output_brightness: BrightnessEnvelope | None = None
@@ -274,10 +270,6 @@ class AudioVisualizer:
         self.previous = np.zeros((self.size, self.size, 3), dtype=np.float32)
         self.window = np.hanning(FFT_SIZE).astype(np.float32)
         frequencies = np.fft.rfftfreq(FFT_SIZE, 1.0 / SAMPLE_RATE)
-        self._energy_masks = [
-            (frequencies >= low) & (frequencies < high)
-            for low, high in ((45, 250), (250, 2500), (2500, 16000))
-        ]
         edges = np.geomspace(45.0, 12_000.0, self.size + 1)
         self.band_masks = [
             (frequencies >= edges[index]) & (frequencies < edges[index + 1])
@@ -292,6 +284,14 @@ class AudioVisualizer:
         self.volume_level = 0.0
         self._wave_phase = 0.0
         self.band_brightness = np.zeros(self.size, dtype=np.float32)
+
+    @property
+    def _energy(self) -> float:
+        return self._adaptive_energy.energy
+
+    @property
+    def _colorful(self) -> float:
+        return self._adaptive_energy.colorful
 
     def _update_volume_level(self, signal: np.ndarray) -> float:
         rms = float(np.sqrt(np.mean(np.square(signal, dtype=np.float64))))
@@ -318,11 +318,7 @@ class AudioVisualizer:
                 changed = any(settings[key] != self._settings[key] for key in settings if key != "slowdown")
                 if settings["preset"] != self._settings["preset"]:
                     self._rainbow_phase = 0.0
-                    self._energy = 0.0
-                    self._colorful = 0.0
-                    self._energy_history.clear()
-                    self._energy_clock = 0.0
-                    self._song_levels = None
+                    self._adaptive_energy.reset()
                     elapsed = 0.0
                 self._settings = settings
                 if changed:
@@ -353,58 +349,10 @@ class AudioVisualizer:
         return frame
 
     def _adaptive_palette(self, samples: np.ndarray, elapsed: float) -> np.ndarray:
-        self._energy_clock += max(0.0, elapsed)
-        while self._energy_history and self._energy_history[0][0] < self._energy_clock - 30.0:
-            self._energy_history.popleft()
-        signal = np.zeros(FFT_SIZE, dtype=np.float64)
-        tail = samples[-FFT_SIZE:]
-        if len(tail):
-            signal[-len(tail):] = tail
-        signal -= signal.mean()
-        # Integrated band power measures the energy of each region, including
-        # energy spread across many notes. Normalize to RMS amplitude.
-        power = np.abs(np.fft.rfft(signal * self.window)) ** 2
-        energies = np.array([power[mask].sum() for mask in self._energy_masks])
-        energies *= 2.0 / (FFT_SIZE * np.square(self.window).sum())
-        amplitudes = np.sqrt(energies)
-        total = float(energies.sum())
-        levels = np.array([total, float(np.max(np.abs(signal))) ** 2]) * self.sensitivity**2
-        # Measure sustained passages before remembering their maxima. A single
-        # kick or click should not set the reference for the next half minute.
-        if self._song_levels is None:
-            self._song_levels = levels
-        else:
-            self._song_levels += (levels - self._song_levels) * (-np.expm1(-min(elapsed, 0.1) / 0.25))
-        energy = colorful = 0.0
-        if np.sqrt(total) * self.sensitivity >= 0.0005:
-            # Music rarely has equal power in all three regions. Count a band
-            # as present when it is within 24 dB of the strongest, fading that
-            # contribution out by 42 dB down. Fullness adds color variety;
-            # no single frequency region determines the palette temperature.
-            relative_db = 20.0 * np.log10(max(float(amplitudes.min() / amplitudes.max()), 1e-12))
-            presence = float(np.clip((relative_db + 42.0) / 18.0, 0, 1))
-            presence = presence * presence * (3.0 - 2.0 * presence)
-            rms_db, peak_db = 10.0 * np.log10(np.maximum(self._song_levels, 1e-12))
-            self._energy_history.append((self._energy_clock, rms_db, peak_db))
-            # Compare this passage with the song's recent maxima, not a fixed
-            # dBFS curve that leaves most mastered music permanently warm.
-            # RMS carries most of the weight: sparse hits reaching the same
-            # peak as a dense chorus must still be able to turn Ocean.
-            rms_max = max(-36.0, max(item[1] for item in self._energy_history))
-            peak_max = max(-30.0, max(item[2] for item in self._energy_history))
-            relative_db = 0.8 * (rms_db - rms_max) + 0.2 * (peak_db - peak_max)
-            amount = float(np.clip((relative_db + 6.0) / 4.0, 0, 1))
-            # A quiet room/noise floor cannot normalize itself into a chorus.
-            audible = float(np.clip((rms_db + 60.0) / 18.0, 0, 1))
-            energy = amount * amount * (3.0 - 2.0 * amount) * audible
-            colorful = energy * (0.8 + 0.2 * presence)
-        # Time-based envelopes prevent flashes on isolated beats and continue
-        # cooling during silence. Slowdown stretches the transitions too.
-        dt = min(elapsed, 0.1) / (1.0 + 3.0 * self.slowdown / 95.0)
-        tau = 0.8 if energy > self._energy else 1.4
-        self._energy += (energy - self._energy) * (-np.expm1(-dt / tau))
-        self._colorful += (colorful - self._colorful) * (-np.expm1(-dt / tau))
-        return make_adaptive_palette(self._settings, self._energy, self._colorful, size=self.size)
+        energy, colorful = self._adaptive_energy.update(
+            samples, elapsed, sensitivity=self.sensitivity, slowdown=self.slowdown,
+        )
+        return make_adaptive_palette(self._settings, energy, colorful, size=self.size)
 
     def _render_frame(self, samples: np.ndarray) -> np.ndarray:
         if self.style == "spectrum":

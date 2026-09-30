@@ -27,6 +27,7 @@ from led_animator import (
     probe_video,
 )
 from video_controls import VideoPlaybackControls
+from video_audio_texture import LiveAudioVideoTexture
 
 
 WIDTH = 16
@@ -189,6 +190,7 @@ def iter_compiled_video(
     flash_limit: bool = False,
     limiter: VideoFlashLimiter | None = None,
     start_seconds: float = 0.0,
+    texture: LiveAudioVideoTexture | None = None,
 ) -> Iterator[bytes]:
     """Decode, sample, resize, and RGB565-encode without saving the video."""
     info = probe_video(path)
@@ -200,11 +202,17 @@ def iter_compiled_video(
         if frame_time + 1e-12 < next_output_time:
             continue
         grid = frame if frame.shape == (size, size, 3) else frame_to_led_grid(frame, size)
+        if texture is not None:
+            grid = texture.apply(grid)
         mapped = map_led_intensity(grid, led_gamma)
         if limiter is not None:
             mapped = limiter.apply(mapped)
+            if texture is not None:
+                texture.publish_frame(mapped)
             yield encode_limited_video_rgb565(mapped)
         else:
+            if texture is not None:
+                texture.publish_frame(mapped)
             yield encode_rgb565(mapped)
         next_output_time += 1.0 / output_fps
 
@@ -215,6 +223,7 @@ def open_video(
     led_gamma: float = LED_INTENSITY_GAMMA,
     size: int = 16,
     flash_limit: bool = False,
+    texture: LiveAudioVideoTexture | None = None,
 ) -> FrameSource:
     if not path.is_file():
         raise ValueError(f"video does not exist: {path}")
@@ -232,11 +241,11 @@ def open_video(
     return FrameSource(
         fps=fps,
         iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma, size,
-                                               flash_limit, limiter),
+                                               flash_limit, limiter, texture=texture),
         size=size,
         iter_frames_at=lambda seconds: iter_compiled_video(
             path, info.fps, fps, led_gamma, size, flash_limit, limiter,
-            start_seconds=seconds),
+            start_seconds=seconds, texture=texture),
     )
 
 
@@ -591,6 +600,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-flash-limit", action="store_true",
                         help="disable 48x48 video highlight and transition limiting")
+    parser.add_argument("--no-audio-reactive", action="store_true",
+                        help="play the video's original colors without live system audio")
     parser.add_argument("--no-compression", action="store_true",
                         help="send uncompressed frames (for older firmware)")
     parser.add_argument("--loop", action="store_true", help="repeat until Ctrl-C")
@@ -642,11 +653,38 @@ def main(argv: list[str] | None = None) -> int:
 
     connection: SerialConnection | None = None
     control_server = None
+    capture = None
     try:
-        source = open_video(args.video, args.fps, args.led_gamma, args.display_size,
-                            flash_limit=args.display_size == 48 and not args.no_flash_limit)
         duration = probe_video_duration(args.video)
-        controls = VideoPlaybackControls(args.video.name, duration, source.fps, args.start)
+        video_fps = probe_video(args.video).fps
+        controls = VideoPlaybackControls(
+            args.video.name, duration,
+            min(args.fps, video_fps) if args.fps is not None else video_fps,
+            args.start,
+        )
+        from audio_palette_controls import PaletteControls, PaletteServer, default_settings
+        palette_path = Path(__file__).resolve().parent / ".build" / "audio-palette.json"
+        palette_controls = PaletteControls(
+            size=args.display_size,
+            settings_path=palette_path if not args.no_audio_reactive else None,
+        )
+        texture = None
+        if not args.no_audio_reactive:
+            from system_audio_visualizer import AudioCapture
+            capture = AudioCapture()
+            capture.start()
+            if not palette_path.is_file():
+                palette_controls.update(default_settings() | {
+                    "preset": "adaptive", "brightness": 1.0,
+                })
+            texture = LiveAudioVideoTexture(
+                palette_controls, controls, capture.latest, size=args.display_size,
+            )
+            print("Live Mac system audio is coloring video and changing saturation.",
+                  file=sys.stderr)
+        source = open_video(args.video, args.fps, args.led_gamma, args.display_size,
+                            flash_limit=args.display_size == 48 and not args.no_flash_limit,
+                            texture=texture)
         port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port} for {args.display_size}×{args.display_size} frames...", file=sys.stderr)
         connection = open_serial(port, args.timeout, baudrate=args.baud)
@@ -657,8 +695,7 @@ def main(argv: list[str] | None = None) -> int:
         handshake(connection, source.fps, args.timeout, max(args.retries, 3),
                   args.display_size,
                   video_mode=args.display_size == 48 and not args.no_flash_limit)
-        from audio_palette_controls import PaletteControls, PaletteServer
-        control_server = PaletteServer(PaletteControls(), args.controls_port,
+        control_server = PaletteServer(palette_controls, args.controls_port,
                                        video_controls=controls, video_path=args.video)
         control_server.start()
         print(f"Video controls: {control_server.url}/#video", file=sys.stderr)
@@ -707,6 +744,8 @@ def main(argv: list[str] | None = None) -> int:
                 except (OSError, RuntimeError):
                     pass
             connection.close()
+        if capture is not None:
+            capture.close()
 
 
 if __name__ == "__main__":

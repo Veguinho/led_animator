@@ -19,6 +19,10 @@ class VideoPlaybackControls:
         self._position = self.validate_position(start)
         self._pending_seek: float | None = None
         self._playing = connected
+        self._audio_reactive = False
+        self._audio_energy = 0.0
+        self._audio_saturation = 0.0
+        self._audio_audible = False
 
     def validate_position(self, seconds: object) -> float:
         if type(seconds) not in (int, float) or not math.isfinite(seconds):
@@ -50,12 +54,26 @@ class VideoPlaybackControls:
             self._playing = False
             self._position = self.duration
 
+    def set_audio_reactivity(self, energy: float, saturation: float,
+                             audible: bool) -> None:
+        with self._lock:
+            self._audio_reactive = True
+            self._audio_energy = min(max(float(energy), 0.0), 1.0)
+            self._audio_saturation = min(max(float(saturation), 0.0), 1.0)
+            self._audio_audible = bool(audible)
+
     def _state_locked(self) -> dict:
         return {
             "name": self.name, "duration": self.duration, "fps": self.fps,
             "position": self._position, "playing": self._playing,
             "connected": self.connected,
             "seeking": self._pending_seek is not None,
+            "audio_reactive": {
+                "enabled": self._audio_reactive,
+                "audible": self._audio_audible,
+                "energy": self._audio_energy,
+                "saturation": self._audio_saturation,
+            },
         }
 
     def state(self) -> dict:

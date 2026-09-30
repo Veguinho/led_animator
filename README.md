@@ -8,7 +8,9 @@ connection. The compressed 48×48 video path plays Wex at its original
 The live firmware routes IO9 and IO10 through RMT and the other seven panels
 through LCD_CAM. Preloaded video uses a separate firmware. The live video
 player opens a local **Video** tab at `http://127.0.0.1:8765/#video` for
-timeline and exact-time seeking. Run `python video_app.py VIDEO.mp4` to use its
+timeline and exact-time seeking. Live Mac audio colors the video texture and
+changes its brightness and saturation; the **Audio palette** tab adjusts the
+colors while the video plays. Run `python video_app.py VIDEO.mp4` to use its
 browser preview without connecting the LED board.
 Viewed from the front, the panel layout is:
 
