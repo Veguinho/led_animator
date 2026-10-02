@@ -205,6 +205,8 @@ def iter_square_video_frames(
                 decoder == "auto" and sys.platform == "darwin" and output_size is not None)
     if hardware:
         accelerated = command.copy()
+        if "-threads" in accelerated:
+            accelerated[accelerated.index("-threads") + 1] = "3"
         accelerated[accelerated.index("-i"):accelerated.index("-i")] = [
             "-hwaccel", "videotoolbox",
         ]

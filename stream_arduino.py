@@ -39,6 +39,7 @@ DEFAULT_DISPLAY_SIZE = 48
 SERIAL_BAUD = 1_500_000
 # Leave room for decoding and parallel LED submission as well as UART traffic.
 DEFAULT_STREAM_FPS = 12.0
+STREAM_COMPRESSION_LEVEL = 1
 DEFAULT_PORT_WAIT = 30.0
 VIDEO_FIRMWARE_OUTPUT_SCALE = 60
 MAX_VIDEO_PIXEL_PWM_TOTAL = 4
@@ -577,7 +578,7 @@ def stream_frames(
         nonlocal sent, timeline_index
         source_payload = source.prepare_frame(raw) if source.prepare_frame else raw
         payload = resize_rgb565(source_payload, source.size, display_size)
-        compressed = zlib.compress(payload, 3) if compress else payload
+        compressed = zlib.compress(payload, STREAM_COMPRESSION_LEVEL) if compress else payload
         packet_type = (PACKET_COMPRESSED_FRAME
                        if len(compressed) < len(payload) else PACKET_FRAME)
         exchange_packet(

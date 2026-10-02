@@ -3,8 +3,9 @@
 The live video path uses VideoToolbox automatically on macOS, with software
 fallback if hardware decoding fails before the first frame. The area scaler,
 48×48 output, source frame rate, live audio overlay, brightness protection and
-serial acknowledgements remain active. The decoder uses two threads and the
-filter graph uses one. See the [FFmpeg hardware acceleration and filter thread
+serial acknowledgements remain active. Hardware decoding uses three threads,
+software fallback uses two, and the filter graph uses one. Stream compression
+uses level 1. See the [FFmpeg hardware acceleration and filter thread
 documentation](https://www.ffmpeg.org/ffmpeg.html).
 
 The web preview requests RGB bytes as base64 instead of thousands of JSON
@@ -49,6 +50,14 @@ macOS CPU speed limits are recorded with each trial because temperature and
 other running applications can change measured percentages. This establishes
 a measured minimum among the attempted configurations, not a proof of a global
 minimum. Repeat the live board check after applying any selected parameters.
+
+For physical image validation, capture the C920 camera with FFmpeg's
+AVFoundation input while the stream and both layers remain active. Allow the
+camera to settle before evaluating its first frames. A warmed four-second
+recording and an accompanying sequence of acknowledged preview frames are in
+`.build/cpu-research/webcam-validation/`. Camera exposure and perspective
+prevent an exact pixel comparison; check the visible image structure, colors
+and movement together with the serial ACK/FPS log.
 
 For a single trial or an optional profile:
 

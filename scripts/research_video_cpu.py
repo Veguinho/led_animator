@@ -75,12 +75,14 @@ def trial(args) -> dict:
         sys.path.insert(0, str(Path(args.modules).resolve()))
     import numpy as np
     import led_animator
+    import stream_arduino
     from audio_palette_controls import PaletteControls, PaletteServer, default_settings
     from stream_arduino import VideoFrameEncoder, VideoFlashLimiter
     from video_audio_texture import LiveAudioVideoTexture
     from video_controls import VideoPlaybackControls
 
     config = json.loads(args.config)
+    config.setdefault("compression", getattr(stream_arduino, "STREAM_COMPRESSION_LEVEL", 3))
     original_popen = subprocess.Popen
     decoders = []
 
@@ -198,7 +200,12 @@ def search(args):
                       (1, 3, 6))]
     rng.shuffle(candidates)
     # First establish the current application's unchanged settings.
-    baseline = {"poll_fps": args.poll_fps, "compression": 3, "compact": args.compact}
+    source_root = Path(args.modules) if args.modules else ROOT
+    compression = re.search(r"^STREAM_COMPRESSION_LEVEL = (\d+)$",
+                            (source_root/"stream_arduino.py").read_text(), re.M)
+    baseline = {"poll_fps": args.poll_fps,
+                "compression": int(compression[1]) if compression else 3,
+                "compact": args.compact}
     best = None
     stale = 0
     def measure(config):
