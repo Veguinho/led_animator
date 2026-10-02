@@ -58,7 +58,8 @@ class ImmediateVideoAudioTests(unittest.TestCase):
         self.assertGreater(self.texture.mapping_envelope[0], 0.9)
         for _ in range(180):
             settled = self.texture.render(self.frame, np.zeros(1024), 1 / 30)
-        np.testing.assert_array_equal(settled, quiet)
+        # The independent color envelope can retain a sub-pixel RGB remainder.
+        np.testing.assert_allclose(settled, quiet, atol=1)
 
     def test_video_selection_and_texture_share_the_latest_audio(self):
         rates = []

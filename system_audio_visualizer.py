@@ -99,6 +99,7 @@ class AudioCapture:
     def __init__(self, capacity: int = SAMPLE_RATE) -> None:
         self._samples = np.zeros(capacity, dtype=np.float32)
         self._sample_count = 0
+        self._write_position = 0
         self._lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
@@ -167,9 +168,14 @@ class AudioCapture:
             if len(samples) >= len(self._samples):
                 self._samples[:] = samples[-len(self._samples) :]
                 self._sample_count = len(self._samples)
+                self._write_position = 0
                 return
-            self._samples[:-len(samples)] = self._samples[len(samples) :]
-            self._samples[-len(samples) :] = samples
+            first = min(len(samples), len(self._samples) - self._write_position)
+            self._samples[self._write_position:self._write_position + first] = samples[:first]
+            remaining = len(samples) - first
+            if remaining:
+                self._samples[:remaining] = samples[first:]
+            self._write_position = (self._write_position + len(samples)) % len(self._samples)
             self._sample_count = min(
                 len(self._samples), self._sample_count + len(samples)
             )
@@ -182,7 +188,11 @@ class AudioCapture:
             if available == 0:
                 return np.zeros(count, dtype=np.float32)
             result = np.zeros(count, dtype=np.float32)
-            result[-available:] = self._samples[-available:]
+            start = (self._write_position - available) % len(self._samples)
+            first = min(available, len(self._samples) - start)
+            result[count-available:count-available+first] = self._samples[start:start+first]
+            if first < available:
+                result[count-available+first:] = self._samples[:available-first]
             return result
 
     def close(self) -> None:

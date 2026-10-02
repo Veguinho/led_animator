@@ -160,8 +160,11 @@ class VideoAudioTextureTests(unittest.TestCase):
         bass = (0.2 * np.sin(2 * np.pi * 110 * phase)).astype(np.float32)
         quiet = self.texture.render(flat, np.zeros(1024), 0)
         attack = self.texture.render(flat, bass, 0)
+        # Glow responds on the first note while its hue stays cool and fades
+        # toward warm colors over subsequent frames.
         self.assertGreater(float(np.abs(attack[22:26, 22:26].astype(float)
-                                       - quiet[22:26, 22:26]).mean()), 10)
+                                       - quiet[22:26, 22:26]).mean()), 3)
+        self.assertGreater(int(attack[24, 24, 2]), int(attack[24, 24, 0]))
         np.testing.assert_array_equal(attack[40:], quiet[40:])
         changes = []
         for _ in range(27):
@@ -341,6 +344,81 @@ class VideoAudioTextureTests(unittest.TestCase):
         np.testing.assert_array_equal(self.texture.band_levels, 0)
         self.assertEqual(self.video.content_fps(), 10)
 
+    def test_adaptive_colors_fade_on_attack_and_release_in_both_response_modes(self):
+        silence = np.zeros(1024, dtype=np.float32)
+        phase = np.arange(1024) / 48_000
+        bass = (0.20 * np.sin(2 * np.pi * 110 * phase)).astype(np.float32)
+        self.video.set_layers({"video": False})
+        for immediate in (False, True):
+            with self.subTest(immediate=immediate):
+                texture = LiveAudioVideoTexture(
+                    self.controls, self.video, lambda count: silence,
+                    size=48, immediate=immediate,
+                )
+                quiet = texture.render(self.frame, silence, 0)
+                previous = texture.palette.astype(float)
+                first = texture.render(self.frame, bass, 1 / 30)
+                self.assertGreater(texture.pulse, 0.9)
+                self.assertGreater(int(first[24, 24, 2]), int(first[24, 24, 0]))
+                self.assertLess(np.abs(texture.palette.astype(float) - previous).max(), 20)
+                previous = texture.palette.astype(float)
+                for signal, duration, target in ((bass, 180, 1), (silence, 240, 0)):
+                    for _ in range(duration):
+                        result = texture.render(self.frame, signal, 1 / 30)
+                        palette = texture.palette.astype(float)
+                        self.assertLess(np.abs(palette - previous).max(), 20)
+                        previous = palette
+                    np.testing.assert_allclose(
+                        texture.palette, make_video_energy_palette(target), atol=1,
+                    )
+                np.testing.assert_allclose(result, quiet, atol=1)
+
+    def test_manual_color_edits_crossfade_through_intermediate_colors(self):
+        self.video.set_layers({"video": False})
+        silence = np.zeros(1024, dtype=np.float32)
+        settings = default_settings() | {
+            "preset": "custom", "colors": ["#ff0000"], "brightness": 1.0,
+        }
+        self.controls.update(settings)
+        red = self.texture.render(self.frame, silence, 0)
+        self.controls.update(settings | {"colors": ["#0000ff"]})
+        np.testing.assert_array_equal(self.texture.render(self.frame, silence, 0), red)
+        previous = red.astype(float)
+        for tick in range(180):
+            blended = self.texture.render(self.frame, silence, 1 / 30)
+            self.assertLess(np.abs(blended.astype(float) - previous).max(), 10)
+            previous = blended.astype(float)
+            if tick == 9:
+                self.assertGreater(int(self.texture.palette[0, 0]), 0)
+                self.assertGreater(int(self.texture.palette[0, 2]), 0)
+        blue_texture = LiveAudioVideoTexture(
+            self.controls, self.video, lambda count: silence, size=48,
+        )
+        blue = blue_texture.render(self.frame, silence, 0)
+        np.testing.assert_allclose(blended, blue, atol=1)
+
+    def test_color_fade_uses_elapsed_time_and_slowdown(self):
+        silence = np.zeros(1024)
+        phase = np.arange(1024) / 48_000
+        bass = (0.2 * np.sin(2 * np.pi * 110 * phase)).astype(np.float32)
+        palettes = []
+        for fps, slowdown in ((30, 20), (60, 20), (30, 95)):
+            controls = PaletteControls(size=48)
+            controls.update(default_settings() | {
+                "preset": "adaptive", "brightness": 1.0, "slowdown": slowdown,
+            })
+            texture = LiveAudioVideoTexture(
+                controls, self.video, lambda count: silence, size=48, immediate=True,
+            )
+            texture.render(self.frame, silence, 0)
+            for _ in range(fps):
+                texture.render(self.frame, bass, 1 / fps)
+            palettes.append(texture.palette.astype(float))
+        np.testing.assert_allclose(palettes[0], palettes[1], atol=1)
+        warm = make_video_energy_palette(1).astype(float)
+        self.assertGreater(np.abs(warm - palettes[2]).mean(),
+                           np.abs(warm - palettes[0]).mean())
+
     def test_audio_level_jitter_does_not_blink_between_cool_and_warm_colors(self):
         # Alternate levels across the adaptive palette's steep transition.
         # The source stays still so changes measure the audio mapping alone.
@@ -417,6 +495,7 @@ class VideoAudioTextureTests(unittest.TestCase):
         frame = np.full((48, 48, 3), 100, dtype=np.uint8)
         phase = np.arange(2048) / 48_000
         outputs = []
+        inner_colors = []
         for frequency in (110, 900, 6000):
             controls = PaletteControls(size=48)
             controls.update(default_settings() | {
@@ -437,6 +516,7 @@ class VideoAudioTextureTests(unittest.TestCase):
                 cycle.append(texture.render(frame, tone, 0))
             result = np.mean(cycle, axis=0)
             radius = texture.radius / 24
+            inner_colors.append(result[radius < 0.30].mean(axis=0))
             outputs.append((
                 result[(radius > 0.72) & (radius < 1.02)].mean(),
                 result[(radius > 0.38) & (radius < 0.66)].mean(),
@@ -444,7 +524,10 @@ class VideoAudioTextureTests(unittest.TestCase):
             ))
         self.assertGreater(outputs[0][0], outputs[2][0] + 2)
         self.assertGreater(outputs[1][1], outputs[2][1] + 0.5)
-        self.assertGreater(outputs[2][2], outputs[0][2] + 2)
+        # Treble lifts blue in the inner ring; its cool tint can lower the
+        # overall RGB average relative to the untinted white bass palette.
+        self.assertGreater(inner_colors[2][2], inner_colors[0][2] + 2)
+        self.assertGreater(inner_colors[2][2], inner_colors[2][0] + 2)
 
         bass = (0.15 * np.sin(2 * np.pi * 110 * phase)).astype(np.float32)
         highs = (0.15 * np.sin(2 * np.pi * 6000 * phase)).astype(np.float32)

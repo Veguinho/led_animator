@@ -612,8 +612,27 @@
       const videoLedContext = videoLedCanvas.getContext("2d");
       const videoPixelCanvas = document.createElement("canvas");
       const videoPixelContext = videoPixelCanvas.getContext("2d");
+      let previewFrame = null, previewFrameKey = null, drawnFrameKey = null;
+      function decodePreview(data) {
+        if (!data.frame_rgb) return data;
+        const key = `${data.session}:${data.frame_revision}:${data.frame_size}`;
+        if (key !== previewFrameKey) {
+          const rgb = atob(data.frame_rgb);
+          const size = data.frame_size;
+          previewFrame = Array.from({ length: size }, (_, y) =>
+            Array.from({ length: size }, (_, x) => {
+              const index = (y * size + x) * 3;
+              return [rgb.charCodeAt(index), rgb.charCodeAt(index + 1), rgb.charCodeAt(index + 2)];
+            }));
+          previewFrameKey = key;
+        }
+        data.frame = previewFrame;
+        return data;
+      }
       function setTab(name) {
         activeTab = name;
+        drawnFrameKey = null;
+        if (name !== "video" && videoConnected) videoPreview.pause();
         for (const tab of ["audio", "video"]) {
           const selected = tab === name;
           $(tab + "-tab").setAttribute("aria-selected", String(selected));
@@ -653,6 +672,14 @@
       }
       videoPreview.addEventListener("play", renderVideoPauseButton);
       videoPreview.addEventListener("pause", renderVideoPauseButton);
+      $("video-preview-wrap").addEventListener("toggle", () => {
+        if (!$("video-preview-wrap").open) {
+          videoPreview.pause();
+        } else if (videoConnected && !videoPaused) {
+          setPreviewTime(Number($("video-progress").value));
+          videoPreview.play().catch(() => {});
+        }
+      });
       videoPreview.addEventListener("loadedmetadata", () => {
         setPreviewTime(previewStart || 0.001);
       });
@@ -719,7 +746,8 @@
         $("video-name").textContent = video.name;
         if (!videoPausing) {
           videoPaused = Boolean(video.paused);
-          if (videoConnected && videoPaused) videoPreview.pause();
+          if (videoConnected && (videoPaused || !$("video-preview-wrap").open || activeTab !== "video"))
+            videoPreview.pause();
           renderVideoPauseButton();
         }
         const reactive = video.audio_reactive;
@@ -756,7 +784,8 @@
         $("video-message").textContent = "Indo para o momento escolhido…";
         try {
           if (syncPreview) setPreviewTime(seconds);
-          if (playPreview && previewAvailable && (!videoConnected || !videoPaused))
+          if (playPreview && previewAvailable && (!videoConnected ||
+              (!videoPaused && $("video-preview-wrap").open)))
             videoPreview.play().catch(() => {});
           const data = await request("/api/video/seek", {
             method: "POST",
@@ -832,7 +861,7 @@
           });
           videoPausing = false;
           renderVideo(data.video, previewAvailable);
-          if (previewAvailable && !data.video.paused) {
+          if (previewAvailable && !data.video.paused && $("video-preview-wrap").open) {
             setPreviewTime(data.video.position);
             videoPreview.play().catch(() => {});
           }
@@ -1173,13 +1202,15 @@
       });
       async function poll() {
         const pollStarted = performance.now();
+        let dataFps = 30;
         if (refreshing || videoStarting) {
           setTimeout(poll, 250);
           return;
         }
         const version = editVersion;
         try {
-          const data = await request("/api/state");
+          const data = decodePreview(await request("/api/state?compact=1"));
+          dataFps = Math.max(1, data.video?.fps || 30);
           if (refreshing || videoStarting) { setTimeout(poll, 250); return; }
           if (activeTab === null) setTab(location.hash === "#audio" ? "audio"
             : data.mode === "video" || location.hash === "#video" ? "video" : "audio");
@@ -1196,8 +1227,8 @@
               : "Explore o vídeo e escolha momentos sem conectar o painel.";
             $("preview-description").textContent = "Saída final com as camadas habilitadas, enviada aos LEDs.";
             $("preview-note").textContent = "A prévia amplia os valores de brilho para mostrar os detalhes; os limites de segurança continuam ativos nos LEDs.";
-            $("slowdown-help").textContent = "Controla a velocidade das ondas. A reação ao áudio continua imediata em cada quadro.";
-            $("palette-adaptive").textContent = "Quiet music brings dark purple and blue. Medium energy shows red and green. Strong energy moves to orange and yellow. Colors and texture respond to the current audio on every frame.";
+            $("slowdown-help").textContent = "Controla a velocidade das ondas e suaviza as mudanças de cor. O brilho continua reagindo ao áudio em cada quadro.";
+            $("palette-adaptive").textContent = "Quiet music brings dark purple and blue. Medium energy shows red and green. Strong energy moves to orange and yellow. Colors blend gradually through a smooth gradient while each beat changes the glow. Slowdown makes the color transitions more gradual.";
           } else {
             $("app-eyebrow").textContent = "System audio / LED studio";
             $("app-title").textContent = "Live palette";
@@ -1222,8 +1253,11 @@
               revision = data.revision;
               renderSettings();
             }
-            if (activeTab === "video" && videoMode && data.video?.connected) drawVideoLed(data.frame);
-            else if (activeTab === "audio") draw(data);
+            if (drawnFrameKey !== previewFrameKey) {
+              if (activeTab === "video" && videoMode && data.video?.connected) drawVideoLed(data.frame);
+              else if (activeTab === "audio") draw(data);
+              drawnFrameKey = previewFrameKey;
+            }
             if (refreshError) status(refreshError, "error");
             else status(videoMode
               ? data.video?.connected ? outputLayers.video
@@ -1238,7 +1272,7 @@
           $("refresh").disabled = true;
         }
         const interval = activeTab === "video" && !videoConnected ? 250
-          : videoConnected ? 16 : 33;
+          : videoConnected ? 1000 / Math.min(60, dataFps) : 33;
         setTimeout(poll, Math.max(0, interval - (performance.now() - pollStarted)));
       }
       poll();

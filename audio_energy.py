@@ -13,6 +13,7 @@ class AdaptiveAudioEnergy:
     def __init__(self, sample_rate: int = 48_000, fft_size: int = 2_048) -> None:
         self.fft_size = fft_size
         self.window = np.hanning(fft_size).astype(np.float32)
+        self._power_scale = 2.0 / (fft_size * np.square(self.window).sum())
         frequencies = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
         self.masks = [
             (frequencies >= low) & (frequencies < high)
@@ -25,6 +26,8 @@ class AdaptiveAudioEnergy:
         self.colorful = 0.0
         self.band_amplitudes = np.zeros(3, dtype=np.float64)
         self.history: deque[tuple[float, float, float]] = deque()
+        self._rms_maxima: deque[tuple[float, float]] = deque()
+        self._peak_maxima: deque[tuple[float, float]] = deque()
         self.clock = 0.0
         self.song_levels: np.ndarray | None = None
 
@@ -35,6 +38,9 @@ class AdaptiveAudioEnergy:
         self.clock += max(0.0, elapsed)
         while self.history and self.history[0][0] < self.clock - 30.0:
             self.history.popleft()
+        for maxima in (self._rms_maxima, self._peak_maxima):
+            while maxima and maxima[0][0] < self.clock - 30.0:
+                maxima.popleft()
         signal = np.zeros(self.fft_size, dtype=np.float64)
         tail = samples[-self.fft_size:]
         if len(tail):
@@ -42,7 +48,7 @@ class AdaptiveAudioEnergy:
         signal -= signal.mean()
         power = np.abs(np.fft.rfft(signal * self.window)) ** 2
         energies = np.array([power[mask].sum() for mask in self.masks])
-        energies *= 2.0 / (self.fft_size * np.square(self.window).sum())
+        energies *= self._power_scale
         amplitudes = np.sqrt(energies)
         self.band_amplitudes = amplitudes
         total = float(energies.sum())
@@ -60,8 +66,12 @@ class AdaptiveAudioEnergy:
             presence = presence * presence * (3.0 - 2.0 * presence)
             rms_db, peak_db = 10.0 * np.log10(np.maximum(self.song_levels, 1e-12))
             self.history.append((self.clock, rms_db, peak_db))
-            rms_max = max(-36.0, max(item[1] for item in self.history))
-            peak_max = max(-30.0, max(item[2] for item in self.history))
+            for maxima, level in ((self._rms_maxima, rms_db), (self._peak_maxima, peak_db)):
+                while maxima and maxima[-1][1] <= level:
+                    maxima.pop()
+                maxima.append((self.clock, level))
+            rms_max = max(-36.0, self._rms_maxima[0][1])
+            peak_max = max(-30.0, self._peak_maxima[0][1])
             relative_db = 0.8 * (rms_db - rms_max) + 0.2 * (peak_db - peak_max)
             amount = float(np.clip((relative_db + 6.0) / 4.0, 0, 1))
             audible = float(np.clip((rms_db + 60.0) / 18.0, 0, 1))

@@ -13,6 +13,7 @@ import time
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
@@ -353,6 +354,20 @@ def limit_video_flash(frame: np.ndarray) -> np.ndarray:
     return np.rint(values).clip(0, 255).astype(np.uint8)
 
 
+@lru_cache(maxsize=1)
+def _rgb565_pwm_totals() -> np.ndarray:
+    packed = np.arange(65536, dtype=np.uint32)
+    red5, green6, blue5 = (packed >> 11) & 31, (packed >> 5) & 63, packed & 31
+    red = (red5 << 3) | (red5 >> 2)
+    green = (green6 << 2) | (green6 >> 4)
+    blue = (blue5 << 3) | (blue5 >> 2)
+    totals = ((red * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
+              + (green * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
+              + (blue * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)).astype(np.uint8)
+    totals.flags.writeable = False
+    return totals
+
+
 def encode_limited_video_rgb565(frame: np.ndarray) -> bytes:
     """Cap the PWM bytes the live firmware will actually transmit.
 
@@ -360,18 +375,11 @@ def encode_limited_video_rgb565(frame: np.ndarray) -> bytes:
     encoding can therefore still leave a few harsh cyan or white pixels.
     """
     values = frame.copy()
+    totals = _rgb565_pwm_totals()
     for _ in range(32):
         payload = encode_rgb565(values)
         packed = np.frombuffer(payload, dtype="<u2").reshape(values.shape[:2])
-        red5 = (packed >> 11) & 31
-        green6 = (packed >> 5) & 63
-        blue5 = packed & 31
-        red = (red5 << 3) | (red5 >> 2)
-        green = (green6 << 2) | (green6 >> 4)
-        blue = (blue5 << 3) | (blue5 >> 2)
-        pwm_total = ((red * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
-                     + (green * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
-                     + (blue * VIDEO_FIRMWARE_OUTPUT_SCALE // 255))
+        pwm_total = totals[packed]
         too_bright = pwm_total > MAX_VIDEO_PIXEL_PWM_TOTAL
         if not np.any(too_bright):
             return payload

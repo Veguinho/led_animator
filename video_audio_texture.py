@@ -25,6 +25,7 @@ VIDEO_ENERGY_STOPS = np.array([
 
 # Keep the palette vivid on its own, but let video detail show through it.
 VIDEO_OVERLAY_OPACITY = 0.45
+HIGH_WAVE_COLOR = np.array([32, 156, 245], dtype=np.float32)
 
 
 @lru_cache(maxsize=4)
@@ -113,20 +114,37 @@ class LiveAudioVideoTexture:
         self.mapping_history: deque[tuple[float, np.ndarray]] = deque()
         self.last_time: float | None = None
         self.palette = np.zeros((size, 3), dtype=np.uint8)
+        self._palette_colors: np.ndarray | None = None
+        self._circular_colors: np.ndarray | None = None
         y, x = np.indices((size, size), dtype=np.float32)
         center = (size - 1) / 2.0
         self.radius = np.hypot(x - center, y - center)
         self.angle = np.arctan2(y - center, x - center)
         self.max_radius = float(self.radius.max())
+        color_radii, self._color_pixels = np.unique(self.radius, return_index=True)
+        self._color_positions = color_radii / self.max_radius * (size - 1)
+        self._color_low = np.floor(self._color_positions).astype(np.intp)
+        self._color_high = np.minimum(self._color_low + 1, size - 1)
+        self._color_mix = (self._color_positions - self._color_low)[:, None]
+        self._color_radii = color_radii
         # A small central core responds on this very frame. Quadratic travel
         # time makes the front slow down as it moves toward the corners.
         self.travel_position = np.clip(
             (self.radius - size * 0.055) / (self.max_radius - size * 0.055), 0.0, 1.0,
         ) ** 2
+        # Transport is radial: symmetric pixels share identical sample times.
+        # Interpolate each distinct radius once, then expand to the LED grid.
+        self._travel_radii, travel_inverse = np.unique(
+            self.travel_position, return_inverse=True,
+        )
+        self._travel_inverse = travel_inverse.reshape(size, size)
+        self._angle_sin = np.sin(2.0 * self.angle)
+        self._angle_cos = np.cos(2.0 * self.angle)
+        self._wave_sample_positions = np.linspace(0, 1, 64)
         radial_position = self.radius / (size / 2.0)
         self.band_regions = np.exp(-0.5 * (
-            (radial_position[..., None] - np.array([0.85, 0.52, 0.15]))
-            / np.array([0.26, 0.24, 0.23])
+            (radial_position[..., None] - np.array([0.85, 0.52, 0.20]))
+            / np.array([0.26, 0.24, 0.14])
         ) ** 2).astype(np.float32)
         self.top_wave_position = np.clip((self.angle + np.pi) / np.pi, 0.0, 1.0)
         self.top_wave_region = (
@@ -141,16 +159,18 @@ class LiveAudioVideoTexture:
         # Average short sample groups before drawing them on LEDs. This keeps
         # bass contours readable and filters treble too fine for the panel.
         tail = samples[-self.energy.fft_size:]
-        waveform = np.interp(
+        resampled = (tail if len(tail) == 1024 else np.interp(
             np.linspace(0, len(tail) - 1, 1024), np.arange(len(tail)), tail,
-        ).reshape(64, 16).mean(axis=1)
+        ))
+        # Keep the original interpolation's float64 averaging precision.
+        waveform = resampled.astype(np.float64, copy=False).reshape(64, 16).mean(axis=1)
         waveform -= waveform.mean()
         waveform = np.convolve(np.pad(waveform, (2, 2), mode="edge"),
                                [0.1, 0.2, 0.4, 0.2, 0.1], mode="valid")
         peak = float(np.max(np.abs(waveform)))
         if peak < 1e-8:
             return self.radius
-        contour = np.interp(self.top_wave_position, np.linspace(0, 1, 64),
+        contour = np.interp(self.top_wave_position, self._wave_sample_positions,
                             waveform / peak)
         displacement = self.size * 0.025 * strength * self.top_wave_region * contour
         return self.radius - displacement
@@ -177,15 +197,16 @@ class LiveAudioVideoTexture:
             self.mapping_history.popleft()
         times = np.array([entry[0] for entry in self.mapping_history])
         values = np.stack([entry[1] for entry in self.mapping_history])
-        delay = travel_time * self.travel_position
+        delay = travel_time * self._travel_radii
         local_time = self.mapping_clock - delay
         feather = np.minimum(0.045, delay * 0.5)
-        return np.stack([
+        fields = np.stack([
             0.25 * np.interp(local_time - feather, times, values[:, channel], left=0.0)
             + 0.50 * np.interp(local_time, times, values[:, channel], left=0.0)
             + 0.25 * np.interp(local_time + feather, times, values[:, channel], left=0.0)
             for channel in range(5)
         ], axis=-1)
+        return fields[self._travel_inverse]
 
     def apply(self, frame: np.ndarray, *,
               select_frame: Callable[[np.ndarray], np.ndarray] | None = None) -> np.ndarray:
@@ -240,16 +261,25 @@ class LiveAudioVideoTexture:
             if self.visual_energy < 0.005 and energy_target == 0.0:
                 self.visual_energy = 0.0
         energy = self.visual_energy
+        # Color has its own time envelope: an immediate beat can brighten the
+        # overlay while its hue blends gradually, including during preset edits.
+        color_time = 0.50 + 0.75 * self.settings["slowdown"] / 95.0
+        color_blend = -np.expm1(-min(max(elapsed, 0.0), 0.1) / color_time)
         palette_settings = self.settings | {"brightness": 1.0, "saturation": 1.0}
         if self.settings["preset"] == "adaptive":
-            self.palette = make_video_energy_palette(
+            palette_target = make_video_energy_palette(
                 energy, size=self.size, reverse=self.settings["reverse"],
             )
         else:
             if self.settings["preset"] == "moving-rainbow":
                 self.phase = (self.phase + min(elapsed, 0.1) *
                               (1.0 - self.settings["slowdown"] / 100.0) / 8.0) % 1.0
-            self.palette = make_palette(palette_settings, size=self.size, phase=self.phase)
+            palette_target = make_palette(palette_settings, size=self.size, phase=self.phase)
+        if self._palette_colors is None:
+            self._palette_colors = palette_target.astype(np.float32)
+        else:
+            self._palette_colors += (palette_target - self._palette_colors) * color_blend
+        self.palette = np.rint(self._palette_colors).clip(0, 255).astype(np.uint8)
 
         pulse_target = float(np.clip((audio_level - 0.002) / 0.09, 0.0, 1.0))
         self.pulse = (pulse_target if self.immediate else
@@ -296,42 +326,64 @@ class LiveAudioVideoTexture:
         base = mapped_radius * spatial_frequency - self.wave_phase
         # A quieter returning wave meets the outgoing ring at the edge. Its
         # second harmonic adds a soft shimmer without making another hard band.
-        outgoing = np.sin(base + 0.12 * drive * np.sin(2.0 * self.angle))
+        outgoing = np.sin(base + 0.12 * drive * self._angle_sin)
         returning = np.sin((2.0 * self.max_radius - mapped_radius)
                            * spatial_frequency - self.wave_phase)
-        harmonic = np.sin(2.0 * base + 0.18 * np.cos(2.0 * self.angle))
+        harmonic = np.sin(2.0 * base + 0.18 * self._angle_cos)
         wave = 0.70 * outgoing + 0.20 * returning + 0.10 * harmonic
         outer_region = np.exp(-0.5 * ((mapped_radius / (self.size / 2.0) - 0.85)
                                     / 0.26) ** 2)
         bass = fields[..., 2] * outer_region
         mids = fields[..., 3] * self.band_regions[..., 1]
         highs = fields[..., 4] * self.band_regions[..., 2]
-        motion = np.maximum.reduce((1.40 * bass, 0.85 * mids, 0.95 * highs))
+        motion = np.maximum.reduce((1.40 * bass, 0.85 * mids, 1.20 * highs))
         crest = np.maximum(wave, 0.0)
+        # Treble makes tighter rings beside the central pulse, with the same
+        # transported attack and soft release as the bass layer.
+        high_crest = np.maximum(np.sin(
+            mapped_radius * (2.0 * np.pi / (self.size * 0.18)) - self.wave_phase,
+        ), 0.0)
 
         palette_position = np.clip(
             mapped_radius / self.max_radius * (self.size - 1) + 2.5 * motion * wave,
             0, self.size - 1,
         )
-        palette_low = np.floor(palette_position).astype(np.intp)
-        palette_high = np.minimum(palette_low + 1, self.size - 1)
-        palette_mix = (palette_position - palette_low)[..., None]
         if self.settings["preset"] == "adaptive":
             stages = _video_energy_stages(self.size)
             if self.settings["reverse"]:
                 stages = stages[:, ::-1]
-            sampled_stages = (stages[:, palette_low] * (1.0 - palette_mix)
-                              + stages[:, palette_high] * palette_mix)
-            circular_palette = _spatial_energy_colors(sampled_stages, local_energy)
+            sampled_stages = (stages[:, self._color_low] * (1.0 - self._color_mix)
+                              + stages[:, self._color_high] * self._color_mix)
+            circular_palette = _spatial_energy_colors(
+                sampled_stages, local_energy.ravel()[self._color_pixels],
+            )
         else:
             circular_palette = (
-                self.palette[palette_low] * (1.0 - palette_mix)
-                + self.palette[palette_high] * palette_mix
+                palette_target[self._color_low] * (1.0 - self._color_mix)
+                + palette_target[self._color_high] * self._color_mix
             )
+        color_high_crest = np.maximum(np.sin(
+            self._color_radii * (2.0 * np.pi / (self.size * 0.18)) - self.wave_phase,
+        ), 0.0)
+        high_tint = (0.85 * highs.ravel()[self._color_pixels]
+                     * (0.55 + 0.45 * color_high_crest))[:, None]
+        circular_palette = (circular_palette * (1.0 - high_tint)
+                            + HIGH_WAVE_COLOR * high_tint)
+        # Blend colors at each radius before waveform deformation, so hue
+        # changes ease in while the live contour still moves immediately.
+        # Fractional RGB values prevent small changes from rounding away.
+        if self._circular_colors is None:
+            self._circular_colors = circular_palette.astype(np.float32)
+        else:
+            self._circular_colors += (circular_palette - self._circular_colors) * color_blend
+        circular_palette = np.stack([
+            np.interp(palette_position, self._color_positions, self._circular_colors[:, channel])
+            for channel in range(3)
+        ], axis=-1)
         # This RGB layer depends only on audio and palette settings, so it
         # remains visible when the video layer is hidden or the source is black.
         colored = circular_palette * 0.55
-        glow = crest * (0.18 * bass + 0.08 * mids + 0.12 * highs)
+        glow = crest * (0.18 * bass + 0.08 * mids) + 0.18 * highs * high_crest
         colored += circular_palette * glow[..., None]
         luma = np.sum(colored * np.array([0.2126, 0.7152, 0.0722], dtype=np.float32),
                       axis=2, keepdims=True)
@@ -342,7 +394,7 @@ class LiveAudioVideoTexture:
         # saved audio brightness value is applied once to the palette layer.
         gain = self.settings["brightness"] ** (1.0 / 2.2) * (1.0 + 0.55 * local_energy)
         result = luma + (colored - luma) * saturation[..., None]
-        shine = crest * (0.22 * bass + 0.08 * mids + 0.14 * highs)
+        shine = crest * (0.22 * bass + 0.08 * mids) + 0.22 * highs * high_crest
         result = np.rint(result * (gain * (
             1.0 + 0.04 * motion * wave + shine
         ))[..., None])\

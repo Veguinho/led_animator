@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import base64
 import copy
 import json
 import re
@@ -154,6 +155,8 @@ class PaletteControls:
         self._display_palette = self._palette.copy()
         self._revision = 0
         self._frame = np.zeros((self.size, self.size, 3), dtype=np.uint8)
+        self._frame_revision = 0
+        self._frame_rgb: str | None = None
 
     def update(self, settings: object) -> None:
         validated = validate_settings(settings)
@@ -180,17 +183,29 @@ class PaletteControls:
     def publish_frame(self, frame: np.ndarray, palette: np.ndarray | None = None) -> None:
         with self._lock:
             self._frame = frame.copy()
+            self._frame_revision += 1
+            self._frame_rgb = None
             if palette is not None:
                 self._display_palette = palette.copy()
 
-    def state(self) -> dict:
+    def state(self, *, compact: bool = False) -> dict:
         with self._lock:
-            return {
+            result = {
                 "settings": copy.deepcopy(self._settings),
                 "revision": self._revision,
-                "palette": self._display_palette.tolist(), "frame": self._frame.tolist(),
+                "palette": self._display_palette.tolist(),
                 "presets": copy.deepcopy(PRESETS),
             }
+            if compact:
+                # Encode once per acknowledged frame, even with several clients.
+                if self._frame_rgb is None:
+                    self._frame_rgb = base64.b64encode(self._frame.tobytes()).decode("ascii")
+                result.update(frame_rgb=self._frame_rgb,
+                              frame_size=self._frame.shape[0],
+                              frame_revision=self._frame_revision)
+            else:
+                result["frame"] = self._frame.tolist()
+            return result
 
 
 class PaletteServer:
@@ -210,8 +225,8 @@ class PaletteServer:
         launch_lock = threading.Lock()
         launching = False
 
-        def state() -> dict:
-            return controls.state() | {
+        def state(*, compact: bool = False) -> dict:
+            return controls.state(compact=compact) | {
                 "session": session, "refresh_available": on_refresh is not None,
                 "mode": "video" if video_controls is not None else "audio",
                 "video": video_controls.state() if video_controls is not None else None,
@@ -222,6 +237,8 @@ class PaletteServer:
             }
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
@@ -287,6 +304,8 @@ class PaletteServer:
                     self.respond(200, page, "text/html; charset=utf-8")
                 elif self.path == "/api/state":
                     self.json_response(200, state())
+                elif self.path == "/api/state?compact=1":
+                    self.json_response(200, state(compact=True))
                 elif self.path == "/api/video/file":
                     self.serve_video()
                 else:

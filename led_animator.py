@@ -128,10 +128,13 @@ def iter_square_video_frames(
     output_size: int | None = None,
     *,
     start_seconds: float = 0.0,
+    decoder: str = "auto",
 ) -> Iterator[np.ndarray]:
     """Decode center-cropped RGB frames, optionally scaled before piping."""
     if not math.isfinite(start_seconds) or start_seconds < 0:
         raise ValueError("start_seconds must be a nonnegative finite number")
+    if decoder not in ("auto", "software", "videotoolbox"):
+        raise ValueError("decoder must be auto, software or videotoolbox")
     ffmpeg = _require_program("ffmpeg")
     side = min(info.width, info.height)
     x = (info.width - side) // 2
@@ -149,6 +152,10 @@ def iter_square_video_frames(
         "error",
         "-noautorotate",
     ]
+    if output_size is not None:
+        # The output is a tiny LED grid. Automatic filter pools add more
+        # scheduling overhead than useful work at this resolution.
+        command.extend(["-threads", "2", "-filter_threads", "1"])
     if start_seconds:
         command.extend(["-ss", f"{start_seconds:.6f}"])
     command.extend([
@@ -165,27 +172,54 @@ def iter_square_video_frames(
         "rgb24",
         "pipe:1",
     ])
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert process.stdout is not None
-    assert process.stderr is not None
+    def decode(options: list[str]) -> Iterator[np.ndarray]:
+        process = subprocess.Popen(options, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert process.stdout is not None
+        assert process.stderr is not None
+        try:
+            while True:
+                data = process.stdout.read(frame_bytes)
+                if not data:
+                    break
+                if len(data) != frame_bytes:
+                    raise RuntimeError("FFmpeg returned an incomplete video frame")
+                yield np.frombuffer(data, dtype=np.uint8).reshape(
+                    decoded_side, decoded_side, 3
+                )
+        finally:
+            interrupted = sys.exc_info()[0] is not None
+            if interrupted and process.poll() is None:
+                process.terminate()
+            process.stdout.close()
+            try:
+                return_code = process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return_code = process.wait()
+            stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+            process.stderr.close()
+            if return_code != 0 and not interrupted:
+                raise RuntimeError(f"FFmpeg could not decode {path}: {stderr}")
 
-    try:
-        while True:
-            data = process.stdout.read(frame_bytes)
-            if not data:
-                break
-            if len(data) != frame_bytes:
-                raise RuntimeError("FFmpeg returned an incomplete video frame")
-            yield np.frombuffer(data, dtype=np.uint8).reshape(
-                decoded_side, decoded_side, 3
-            )
-    finally:
-        process.stdout.close()
-        stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-        process.stderr.close()
-        return_code = process.wait()
-        if return_code != 0 and sys.exc_info()[0] is None:
-            raise RuntimeError(f"FFmpeg could not decode {path}: {stderr}")
+    hardware = (decoder == "videotoolbox" or
+                decoder == "auto" and sys.platform == "darwin" and output_size is not None)
+    if hardware:
+        accelerated = command.copy()
+        accelerated[accelerated.index("-i"):accelerated.index("-i")] = [
+            "-hwaccel", "videotoolbox",
+        ]
+        emitted = False
+        try:
+            for frame in decode(accelerated):
+                emitted = True
+                yield frame
+            return
+        except RuntimeError:
+            # Unsupported hardware/codecs may fail before producing a frame.
+            # Never restart a partially emitted timeline from the beginning.
+            if decoder != "auto" or emitted:
+                raise
+    yield from decode(command)
 
 
 def merge_neighboring_pixels(frame: np.ndarray) -> np.ndarray:
