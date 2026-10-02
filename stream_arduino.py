@@ -21,6 +21,7 @@ import numpy as np
 from export_arduino import encode_rgb565
 from led_animator import (
     LED_INTENSITY_GAMMA,
+    _require_program,
     frame_to_led_grid,
     iter_square_video_frames,
     map_led_intensity,
@@ -87,6 +88,10 @@ class FrameSource:
     iter_frames: Callable[[], Iterator[bytes]]
     size: int = 16
     iter_frames_at: Callable[[float], Iterator[bytes]] | None = None
+    # Deferred sources yield undecorated RGB. Sample live audio only after
+    # pacing/dropping, then encode the frame immediately before USB output.
+    prepare_frame: Callable[[bytes], bytes] | None = None
+    on_frame_sent: Callable[[bytes], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +186,75 @@ def exchange_packet(
     ) from last_error
 
 
+class AdaptiveVideoFrameHold:
+    """Select new video images at a changing rate without altering panel timing."""
+
+    def __init__(self) -> None:
+        self.frame: np.ndarray | None = None
+        self.credit = 0.0
+        self.content_fps = 0.0
+
+    def select(self, frame: np.ndarray, content_fps: float,
+               stream_fps: float) -> np.ndarray:
+        if self.frame is None or content_fps > self.content_fps + 1.0:
+            self.frame = frame.copy()
+            self.credit = 0.0
+        else:
+            self.credit += min(1.0, content_fps / stream_fps)
+            if self.credit + 1e-9 >= 1.0:
+                self.frame = frame.copy()
+                self.credit = max(0.0, self.credit - 1.0)
+        self.content_fps = content_fps
+        return self.frame
+
+
+class VideoFrameEncoder:
+    """Map current audio onto a decoded image at its actual send deadline."""
+
+    def __init__(self, fps: float, gamma: float, size: int,
+                 limiter: VideoFlashLimiter | None,
+                 texture: LiveAudioVideoTexture | None) -> None:
+        self.fps, self.gamma, self.size = fps, gamma, size
+        self.limiter, self.texture = limiter, texture
+        self.frame_hold = AdaptiveVideoFrameHold()
+
+    def prepare(self, rgb: bytes) -> bytes:
+        grid = np.frombuffer(rgb, dtype=np.uint8).reshape(self.size, self.size, 3)
+        if self.texture is not None:
+            def select(frame: np.ndarray) -> np.ndarray:
+                if self.texture.video_controls.is_paused():
+                    if self.frame_hold.frame is None:
+                        self.frame_hold.frame = frame.copy()
+                    return self.frame_hold.frame
+                return self.frame_hold.select(
+                    frame, self.texture.video_controls.content_fps(), self.fps,
+                )
+
+            grid = self.texture.apply(grid, select_frame=select)
+        mapped = map_led_intensity(grid, self.gamma)
+        if self.limiter is not None:
+            return encode_limited_video_rgb565(self.limiter.apply(mapped))
+        return encode_rgb565(mapped)
+
+    def publish(self, payload: bytes) -> None:
+        if self.texture is not None:
+            self.texture.publish_frame(decode_rgb565_frame(payload, self.size))
+
+
+def iter_video_grids(path: Path, source_fps: float, output_fps: float,
+                     size: int, start_seconds: float = 0.0) -> Iterator[bytes]:
+    """Decode raw RGB without sampling audio or advancing its envelopes."""
+    info = probe_video(path)
+    next_output_time = 0.0
+    decode_options = {"start_seconds": start_seconds} if start_seconds else {}
+    for index, frame in enumerate(iter_square_video_frames(path, info, size, **decode_options)):
+        if index / source_fps + 1e-12 < next_output_time:
+            continue
+        grid = frame if frame.shape == (size, size, 3) else frame_to_led_grid(frame, size)
+        yield grid.tobytes()
+        next_output_time += 1.0 / output_fps
+
+
 def iter_compiled_video(
     path: Path,
     source_fps: float,
@@ -193,28 +267,12 @@ def iter_compiled_video(
     texture: LiveAudioVideoTexture | None = None,
 ) -> Iterator[bytes]:
     """Decode, sample, resize, and RGB565-encode without saving the video."""
-    info = probe_video(path)
-    next_output_time = 0.0
     limiter = limiter or (VideoFlashLimiter(output_fps) if flash_limit else None)
-    decode_options = {"start_seconds": start_seconds} if start_seconds else {}
-    for index, frame in enumerate(iter_square_video_frames(path, info, size, **decode_options)):
-        frame_time = index / source_fps
-        if frame_time + 1e-12 < next_output_time:
-            continue
-        grid = frame if frame.shape == (size, size, 3) else frame_to_led_grid(frame, size)
-        if texture is not None:
-            grid = texture.apply(grid)
-        mapped = map_led_intensity(grid, led_gamma)
-        if limiter is not None:
-            mapped = limiter.apply(mapped)
-            if texture is not None:
-                texture.publish_frame(mapped)
-            yield encode_limited_video_rgb565(mapped)
-        else:
-            if texture is not None:
-                texture.publish_frame(mapped)
-            yield encode_rgb565(mapped)
-        next_output_time += 1.0 / output_fps
+    encoder = VideoFrameEncoder(output_fps, led_gamma, size, limiter, texture)
+    for rgb in iter_video_grids(path, source_fps, output_fps, size, start_seconds):
+        payload = encoder.prepare(rgb)
+        encoder.publish(payload)
+        yield payload
 
 
 def open_video(
@@ -238,6 +296,19 @@ def open_video(
     # Keep the exposure state across repeats of a short loop. Recreating it
     # each pass would dim the opening for a second every time it restarts.
     limiter = VideoFlashLimiter(fps) if flash_limit else None
+    if texture is not None:
+        encoder = VideoFrameEncoder(fps, led_gamma, size, limiter, texture)
+
+        def reactive_frames_at(seconds: float = 0.0) -> Iterator[bytes]:
+            # Start seeks/repeats with the new image; keep exposure state.
+            encoder.frame_hold = AdaptiveVideoFrameHold()
+            yield from iter_video_grids(path, info.fps, fps, size, seconds)
+
+        return FrameSource(
+            fps=fps, size=size,
+            iter_frames=reactive_frames_at, iter_frames_at=reactive_frames_at,
+            prepare_frame=encoder.prepare, on_frame_sent=encoder.publish,
+        )
     return FrameSource(
         fps=fps,
         iter_frames=lambda: iter_compiled_video(path, info.fps, fps, led_gamma, size,
@@ -251,7 +322,7 @@ def open_video(
 
 def probe_video_duration(path: Path) -> float:
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+        [_require_program("ffprobe"), "-v", "error", "-show_entries", "format=duration",
          "-of", "json", str(path)],
         capture_output=True, text=True, check=True,
     )
@@ -308,6 +379,19 @@ def encode_limited_video_rgb565(frame: np.ndarray) -> bytes:
                  pwm_total[too_bright].astype(np.float32))[:, None]
         values[too_bright] = np.floor(values[too_bright] * scale).astype(np.uint8)
     raise RuntimeError("video pixel PWM limit did not converge")
+
+
+def decode_rgb565_frame(payload: bytes, size: int) -> np.ndarray:
+    """Expand the exact encoded LED colors for the browser preview."""
+    packed = np.frombuffer(payload, dtype="<u2").reshape(size, size)
+    red = (packed >> 11) & 31
+    green = (packed >> 5) & 63
+    blue = packed & 31
+    frame = np.empty((size, size, 3), dtype=np.uint8)
+    frame[..., 0] = (red << 3) | (red >> 2)
+    frame[..., 1] = (green << 2) | (green >> 4)
+    frame[..., 2] = (blue << 3) | (blue >> 2)
+    return frame
 
 
 class VideoFlashLimiter:
@@ -479,6 +563,49 @@ def stream_frames(
     stats_start = time.monotonic()
     stats_sent = 0
     pass_start_seconds = start_seconds
+    last_raw_frame: bytes | None = None
+
+    def send_output(raw: bytes) -> None:
+        nonlocal sent, timeline_index
+        source_payload = source.prepare_frame(raw) if source.prepare_frame else raw
+        payload = resize_rgb565(source_payload, source.size, display_size)
+        compressed = zlib.compress(payload, 3) if compress else payload
+        packet_type = (PACKET_COMPRESSED_FRAME
+                       if len(compressed) < len(payload) else PACKET_FRAME)
+        exchange_packet(
+            connection, packet_type, timeline_index + 1,
+            compressed if packet_type == PACKET_COMPRESSED_FRAME else payload,
+            STATUS_ACK, timeout, retries,
+        )
+        if source.on_frame_sent is not None:
+            # Publish only frames actually acknowledged by the board.
+            source.on_frame_sent(source_payload)
+        sent += 1
+        timeline_index += 1
+
+    def check_video_controls() -> float | None:
+        nonlocal pass_start
+        if controls is None:
+            return None
+        paused_at = None
+        while controls.is_paused():
+            if paused_at is None:
+                paused_at = time.monotonic()
+            seek = controls.take_seek()
+            if seek is not None:
+                return seek
+            if source.prepare_frame is not None and last_raw_frame is not None:
+                # Freeze the video timeline, while audio and layer switches
+                # continue to refresh the final output at the panel rate.
+                refresh_start = time.monotonic()
+                send_output(last_raw_frame)
+                time.sleep(max(0.0, period - (time.monotonic() - refresh_start)))
+            else:
+                time.sleep(0.02)
+        if paused_at is not None and pass_start is not None:
+            # Remove paused time from the clock so resume never skips ahead.
+            pass_start += time.monotonic() - paused_at
+        return controls.take_seek()
 
     while True:
         frames_this_pass = 0
@@ -490,14 +617,12 @@ def stream_frames(
                   if source.iter_frames_at is not None else source.iter_frames())
         try:
             for payload in frames:
-                if controls is not None:
-                    seek_to = controls.take_seek()
-                    if seek_to is not None:
-                        break
-                payload = resize_rgb565(payload, source.size, display_size)
+                if last_raw_frame is None and source.prepare_frame is not None:
+                    last_raw_frame = payload
+                seek_to = check_video_controls()
+                if seek_to is not None:
+                    break
                 frames_this_pass += 1
-                if controls is not None:
-                    controls.set_position(pass_start_seconds + (frames_this_pass - 1) * period)
                 if pass_start is None:
                     # Start the clock after FFmpeg produces its first frame, so
                     # process startup never causes the beginning of a clip to drop.
@@ -521,19 +646,13 @@ def stream_frames(
                         continue
                 if now < deadline:
                     time.sleep(deadline - now)
-                compressed = zlib.compress(payload, 3) if compress else payload
-                packet_type = (PACKET_COMPRESSED_FRAME
-                               if len(compressed) < len(payload) else PACKET_FRAME)
-                exchange_packet(
-                    connection,
-                    packet_type,
-                    timeline_index + 1,
-                    compressed if packet_type == PACKET_COMPRESSED_FRAME else payload,
-                    STATUS_ACK,
-                    timeout,
-                    retries,
-                )
-                sent += 1
+                seek_to = check_video_controls()
+                if seek_to is not None:
+                    break
+                last_raw_frame = payload
+                send_output(payload)
+                if controls is not None:
+                    controls.set_position(pass_start_seconds + pass_index * period)
                 if sent == 1:
                     print(
                         f"Controller acknowledged the first {display_size}×{display_size} frame.",
@@ -551,13 +670,13 @@ def stream_frames(
                         flush=True,
                     )
                     stats_start, stats_sent = stats_now, sent
-                timeline_index += 1
         finally:
             close = getattr(frames, "close", None)
             if close is not None:
                 close()
         if seek_to is not None:
             pass_start_seconds = seek_to
+            last_raw_frame = None
             continue
         if frames_this_pass == 0:
             raise RuntimeError("video produced no frames")
@@ -602,6 +721,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="disable 48x48 video highlight and transition limiting")
     parser.add_argument("--no-audio-reactive", action="store_true",
                         help="play the video's original colors without live system audio")
+    parser.add_argument("--audio-response", choices=("immediate", "smooth"), default="immediate",
+                        help="video motion response (default: immediate; overlay attacks at the center and fades softly)")
     parser.add_argument("--no-compression", action="store_true",
                         help="send uncompressed frames (for older firmware)")
     parser.add_argument("--loop", action="store_true", help="repeat until Ctrl-C")
@@ -668,7 +789,9 @@ def main(argv: list[str] | None = None) -> int:
             size=args.display_size,
             settings_path=palette_path if not args.no_audio_reactive else None,
         )
-        texture = None
+        texture = LiveAudioVideoTexture(
+            palette_controls, controls, None, size=args.display_size,
+        )
         if not args.no_audio_reactive:
             from system_audio_visualizer import AudioCapture
             capture = AudioCapture()
@@ -677,10 +800,12 @@ def main(argv: list[str] | None = None) -> int:
                 palette_controls.update(default_settings() | {
                     "preset": "adaptive", "brightness": 1.0,
                 })
+            controls.set_layers({"audio_palette": True})
             texture = LiveAudioVideoTexture(
                 palette_controls, controls, capture.latest, size=args.display_size,
+                immediate=args.audio_response == "immediate",
             )
-            print("Live Mac system audio is coloring video and changing saturation.",
+            print("Live Mac system audio drives a separate circular palette output layer.",
                   file=sys.stderr)
         source = open_video(args.video, args.fps, args.led_gamma, args.display_size,
                             flash_limit=args.display_size == 48 and not args.no_flash_limit,

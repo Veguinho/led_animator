@@ -71,6 +71,9 @@ class LedAnimation:
 
 def _require_program(name: str) -> str:
     location = shutil.which(name)
+    if location is None and sys.platform == "darwin":
+        # Dock/LaunchAgent processes do not inherit the shell's Homebrew PATH.
+        location = shutil.which(name, path="/opt/homebrew/bin:/usr/local/bin")
     if location is None:
         raise RuntimeError(
             f"{name} was not found. Install FFmpeg and make sure {name} is on PATH."

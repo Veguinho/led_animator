@@ -145,6 +145,135 @@ class PaletteServerTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 400)
             error.exception.close()
 
+    def test_video_pause_resume_and_seek_preserve_playback_state(self):
+        video = VideoPlaybackControls("clip.mp4", 120, 24, start=15)
+        server = PaletteServer(PaletteControls(), port=0, video_controls=video)
+        server.start()
+        self.addCleanup(server.close)
+
+        def playback(payload, **headers):
+            return urlopen(Request(server.url + "/api/video/playback",
+                data=json.dumps(payload).encode(), method="POST",
+                headers={"Content-Type": "application/json", **headers}), timeout=2)
+
+        with playback({"paused": True}, Origin=server.url) as response:
+            paused = json.load(response)["video"]
+        self.assertTrue(paused["paused"])
+        self.assertFalse(paused["playing"])
+        self.assertEqual(paused["position"], 15)
+        self.assertTrue(video.seek(30)["paused"])
+        self.assertFalse(video.state()["playing"])
+        self.assertEqual(video.take_seek(), 30)
+        with playback({"paused": False}, Origin=server.url) as response:
+            resumed = json.load(response)["video"]
+        self.assertFalse(resumed["paused"])
+        self.assertTrue(resumed["playing"])
+        self.assertEqual(resumed["position"], 30)
+        for payload, headers, expected in (
+            ({"paused": 1}, {}, 400), ({"paused": "true"}, {}, 400),
+            ({"paused": None}, {}, 400), ({}, {}, 400), (None, {}, 400),
+            ({"paused": True, "extra": 1}, {}, 400),
+            ({"paused": True}, {"Origin": "https://example.com"}, 403),
+        ):
+            with self.subTest(payload=payload), self.assertRaises(HTTPError) as error:
+                playback(payload, **headers)
+            self.assertEqual(error.exception.code, expected)
+            error.exception.close()
+            self.assertTrue(video.state()["playing"])
+
+    def test_pause_without_running_video_is_unavailable(self):
+        with self.assertRaises(HTTPError) as error:
+            urlopen(Request(self.server.url + "/api/video/playback", data=b'{"paused":true}',
+                headers={"Content-Type": "application/json"}, method="POST"), timeout=2)
+        self.assertEqual(error.exception.code, 503)
+        error.exception.close()
+
+    def test_video_texture_mapping_toggle_and_invalid_requests(self):
+        video = VideoPlaybackControls("clip.mp4", 60, 30, start=15)
+        video.set_paused(True)
+        server = PaletteServer(PaletteControls(), port=0, video_controls=video)
+        server.start()
+        self.addCleanup(server.close)
+
+        def mapping(payload, **headers):
+            return urlopen(Request(server.url + "/api/video/texture-mapping",
+                data=json.dumps(payload).encode(), method="POST",
+                headers={"Content-Type": "application/json", **headers}), timeout=2)
+
+        for enabled in (False, True):
+            with mapping({"enabled": enabled}, Origin=server.url) as response:
+                state = json.load(response)["video"]
+            self.assertEqual(state["texture_mapping_enabled"], enabled)
+            self.assertEqual(state["position"], 15)
+            self.assertTrue(state["paused"])
+            with urlopen(server.url + "/api/state", timeout=2) as response:
+                self.assertEqual(json.load(response)["video"], state)
+        for payload, headers, expected in (
+            ({"enabled": 1}, {}, 400), ({"enabled": "false"}, {}, 400),
+            ({"enabled": None}, {}, 400), ({}, {}, 400), (None, {}, 400),
+            ({"enabled": False, "extra": 1}, {}, 400),
+            ({"enabled": False}, {"Origin": "https://example.com"}, 403),
+        ):
+            with self.subTest(payload=payload), self.assertRaises(HTTPError) as error:
+                mapping(payload, **headers)
+            self.assertEqual(error.exception.code, expected)
+            error.exception.close()
+            self.assertTrue(video.texture_mapping_enabled())
+        with self.assertRaises(HTTPError) as error:
+            urlopen(Request(self.server.url + "/api/video/texture-mapping",
+                data=b'{"enabled":false}', method="POST",
+                headers={"Content-Type": "application/json"}), timeout=2)
+        self.assertEqual(error.exception.code, 503)
+        error.exception.close()
+
+    def test_output_layers_toggle_independently_and_validate_atomically(self):
+        video = VideoPlaybackControls("clip.mp4", 60, 30, start=15)
+        video.set_paused(True)
+        server = PaletteServer(PaletteControls(), port=0, video_controls=video)
+        server.start()
+        self.addCleanup(server.close)
+
+        def layers(payload, **headers):
+            return urlopen(Request(server.url + "/api/video/layers",
+                data=json.dumps(payload).encode(), method="POST",
+                headers={"Content-Type": "application/json", **headers}), timeout=2)
+
+        for payload, expected in (
+            ({"video": False}, {"video": False, "audio_palette": True}),
+            ({"audio_palette": False}, {"video": False, "audio_palette": False}),
+            ({"video": True}, {"video": True, "audio_palette": False}),
+            ({"audio_palette": True}, {"video": True, "audio_palette": True}),
+        ):
+            with layers(payload, Origin=server.url) as response:
+                state = json.load(response)["video"]
+            self.assertEqual(state["layers"], expected)
+            self.assertEqual(state["position"], 15)
+            self.assertTrue(state["paused"])
+            with urlopen(server.url + "/api/state", timeout=2) as response:
+                self.assertEqual(json.load(response)["video"], state)
+        original = video.state()
+        for payload, headers, code in (
+            ({}, {}, 400), (None, {}, 400), ([], {}, 400),
+            ({"video": 0}, {}, 400), ({"audio_palette": "false"}, {}, 400),
+            ({"video": False, "audio_palette": None}, {}, 400),
+            ({"video": False, "unknown": True}, {}, 400),
+            ({"video": False}, {"Origin": "https://example.com"}, 403),
+        ):
+            with self.subTest(payload=payload), self.assertRaises(HTTPError) as error:
+                layers(payload, **headers)
+            self.assertEqual(error.exception.code, code)
+            error.exception.close()
+            self.assertEqual(video.state(), original)
+        snapshot = video.output_layers()
+        snapshot["video"] = False
+        self.assertTrue(video.output_layers()["video"])
+        with self.assertRaises(HTTPError) as error:
+            urlopen(Request(self.server.url + "/api/video/layers",
+                data=b'{"video":false}', method="POST",
+                headers={"Content-Type": "application/json"}), timeout=2)
+        self.assertEqual(error.exception.code, 503)
+        error.exception.close()
+
     def test_offline_video_preview_serves_byte_ranges_and_accepts_seek(self):
         with tempfile.TemporaryDirectory() as directory:
             clip = Path(directory) / "preview.mp4"

@@ -199,11 +199,16 @@ class PaletteServer:
         on_refresh: Callable[[], None] | None = None,
         video_controls: VideoPlaybackControls | None = None,
         video_path: Path | None = None,
+        on_video_start: Callable[[Path], None] | None = None,
+        video_library: dict[str, Path] | None = None,
     ) -> None:
         if video_path is not None and not video_path.is_file():
             raise ValueError(f"video does not exist: {video_path}")
         page = Path(__file__).with_name("audio_palette_controls.html").read_bytes()
         session = uuid.uuid4().hex
+        library = dict(video_library or {})
+        launch_lock = threading.Lock()
+        launching = False
 
         def state() -> dict:
             return controls.state() | {
@@ -211,6 +216,9 @@ class PaletteServer:
                 "mode": "video" if video_controls is not None else "audio",
                 "video": video_controls.state() if video_controls is not None else None,
                 "video_file_available": video_path is not None,
+                "video_start_available": on_video_start is not None,
+                "videos": list(library),
+                "video_starting": launching,
             }
 
         class Handler(BaseHTTPRequestHandler):
@@ -293,7 +301,8 @@ class PaletteServer:
                     self.end_headers()
 
             def do_POST(self) -> None:
-                if self.path not in ("/api/palette", "/api/refresh", "/api/video/seek"):
+                nonlocal launching
+                if self.path not in ("/api/palette", "/api/refresh", "/api/video/seek", "/api/video/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
@@ -312,13 +321,34 @@ class PaletteServer:
                     if self.path == "/api/refresh":
                         if payload != {}:
                             raise ValueError("refresh expects an empty JSON object")
-                    elif self.path == "/api/video/seek":
+                    elif self.path == "/api/video/start":
+                        if on_video_start is None:
+                            self.json_response(503, {"error": "video launch is unavailable"})
+                            return
+                        if (not isinstance(payload, dict) or payload.keys() != {"video"}
+                            or not isinstance(payload["video"], str) or payload["video"] not in library):
+                            raise ValueError("Escolha um vídeo da lista.")
+                        selected_video = library[payload["video"]]
+                        if not selected_video.is_file():
+                            raise ValueError("O arquivo de vídeo não está mais disponível.")
+                    elif self.path in ("/api/video/seek", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
                         if video_controls is None:
                             self.json_response(503, {"error": "video player is not running"})
                             return
-                        if not isinstance(payload, dict) or payload.keys() != {"seconds"}:
-                            raise ValueError("seek expects a video time in seconds")
-                        video_state = video_controls.seek(payload["seconds"])
+                        if self.path == "/api/video/layers":
+                            video_state = video_controls.set_layers(payload)
+                        elif self.path == "/api/video/texture-mapping":
+                            if not isinstance(payload, dict) or payload.keys() != {"enabled"}:
+                                raise ValueError("texture mapping expects an enabled boolean")
+                            video_state = video_controls.set_texture_mapping(payload["enabled"])
+                        elif self.path == "/api/video/playback":
+                            if not isinstance(payload, dict) or payload.keys() != {"paused"}:
+                                raise ValueError("playback expects a paused boolean")
+                            video_state = video_controls.set_paused(payload["paused"])
+                        else:
+                            if not isinstance(payload, dict) or payload.keys() != {"seconds"}:
+                                raise ValueError("seek expects a video time in seconds")
+                            video_state = video_controls.seek(payload["seconds"])
                     else:
                         controls.update(payload)
                 except (ValueError, UnicodeError) as exc:
@@ -326,6 +356,16 @@ class PaletteServer:
                     return
                 except OSError:
                     self.json_response(500, {"error": "could not save palette settings"})
+                    return
+                if self.path == "/api/video/start":
+                    with launch_lock:
+                        if launching:
+                            self.json_response(409, {"error": "O vídeo já está iniciando."})
+                            return
+                        launching = True
+                    self.json_response(202, {"starting": True, "session": session})
+                    self.wfile.flush()
+                    on_video_start(selected_video)
                     return
                 if self.path == "/api/refresh":
                     if on_refresh is None:
@@ -335,7 +375,7 @@ class PaletteServer:
                     self.wfile.flush()
                     on_refresh()
                     return
-                if self.path == "/api/video/seek":
+                if self.path in ("/api/video/seek", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
                     self.json_response(200, {"video": video_state})
                     return
                 self.json_response(200, state())

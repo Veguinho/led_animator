@@ -23,13 +23,14 @@ class AdaptiveAudioEnergy:
     def reset(self) -> None:
         self.energy = 0.0
         self.colorful = 0.0
+        self.band_amplitudes = np.zeros(3, dtype=np.float64)
         self.history: deque[tuple[float, float, float]] = deque()
         self.clock = 0.0
         self.song_levels: np.ndarray | None = None
 
     def update(
         self, samples: np.ndarray, elapsed: float, *, sensitivity: float = 1.5,
-        slowdown: float = 20.0,
+        slowdown: float = 20.0, immediate: bool = False,
     ) -> tuple[float, float]:
         self.clock += max(0.0, elapsed)
         while self.history and self.history[0][0] < self.clock - 30.0:
@@ -43,9 +44,10 @@ class AdaptiveAudioEnergy:
         energies = np.array([power[mask].sum() for mask in self.masks])
         energies *= 2.0 / (self.fft_size * np.square(self.window).sum())
         amplitudes = np.sqrt(energies)
+        self.band_amplitudes = amplitudes
         total = float(energies.sum())
         levels = np.array([total, float(np.max(np.abs(signal))) ** 2]) * sensitivity**2
-        if self.song_levels is None:
+        if immediate or self.song_levels is None:
             self.song_levels = levels
         else:
             self.song_levels += (levels - self.song_levels) * (
@@ -65,6 +67,11 @@ class AdaptiveAudioEnergy:
             audible = float(np.clip((rms_db + 60.0) / 18.0, 0, 1))
             energy = amount * amount * (3.0 - 2.0 * amount) * audible
             colorful = energy * (0.8 + 0.2 * presence)
+        # Live video follows this audio block on both attack and release.
+        # The visualizer can still choose the slower passage envelope.
+        if immediate:
+            self.energy, self.colorful = energy, colorful
+            return self.energy, self.colorful
         dt = min(elapsed, 0.1) / (1.0 + 3.0 * slowdown / 95.0)
         tau = 0.8 if energy > self.energy else 1.4
         self.energy += (energy - self.energy) * (-np.expm1(-dt / tau))

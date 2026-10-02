@@ -594,6 +594,13 @@ def main(argv: list[str] | None = None) -> int:
     control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
     refresh_requested = threading.Event()
+    requested_video: Path | None = None
+
+    def start_video(path: Path) -> None:
+        nonlocal requested_video
+        requested_video = path
+        refresh_requested.set()
+
     try:
         print(
             "Requesting access to the Mac's system audio. If prompted, allow "
@@ -621,7 +628,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         if controls is not None:
-            control_server = PaletteServer(controls, args.controls_port, on_refresh=refresh_requested.set)
+            root = Path(__file__).resolve().parent
+            clips = sorted([*root.glob("*.mp4"), *(root / "video_clips").glob("*.mp4")],
+                           key=lambda path: (not path.name.endswith(".square.mp4"), path.name.casefold()))
+            control_server = PaletteServer(
+                controls, args.controls_port, on_refresh=refresh_requested.set,
+                on_video_start=start_video,
+                video_library={str(path.relative_to(root)): path for path in clips},
+            )
             control_server.start()
             print(f"Live palette controls: {control_server.url}", file=sys.stderr)
             if not args.no_browser:
@@ -641,7 +655,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except RefreshRequested:
-        print("Refreshing the app...", file=sys.stderr)
+        print("Starting video..." if requested_video is not None else "Refreshing the app...",
+              file=sys.stderr)
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
         return 130
@@ -674,6 +689,22 @@ def main(argv: list[str] | None = None) -> int:
     assert control_server is not None
     args.controls_port = control_server.port
     args.no_browser = True
+    if requested_video is not None:
+        video_args = [
+            sys.executable, str(Path(__file__).with_name("stream_arduino.py").resolve()),
+            str(requested_video), "--port", port, "--baud", str(args.baud),
+            "--display-size", str(args.display_size), "--controls-port", str(args.controls_port),
+            "--timeout", str(args.timeout), "--retries", str(args.retries),
+            "--no-browser", "--loop",
+        ]
+        if args.clear_on_exit:
+            video_args.append("--clear-on-exit")
+        try:
+            os.execv(sys.executable, video_args)
+        except OSError as exc:
+            print(f"error: could not start video: {exc}", file=sys.stderr)
+            return 1
+        return 0
     restart_args = []
     for name, value in vars(args).items():
         if value is None:

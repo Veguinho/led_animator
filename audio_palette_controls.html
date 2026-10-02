@@ -129,6 +129,17 @@
         border-radius: 12px;
         background: #08080c;
       }
+      .video-led-preview {
+        max-width: 560px;
+        margin: 16px auto 8px;
+        image-rendering: pixelated;
+      }
+      .video-original {
+        margin: 24px 0;
+      }
+      .video-original summary {
+        cursor: pointer;
+      }
       .video-time {
         display: flex;
         justify-content: space-between;
@@ -153,6 +164,17 @@
         padding: 10px 14px;
         font: inherit;
         font-variant-numeric: tabular-nums;
+      }
+      .seek-row select {
+        flex: 1;
+        min-width: 0;
+        max-width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #24242d;
+        color: inherit;
+        padding: 10px 14px;
+        font: inherit;
       }
       .card {
         background: #19191f;
@@ -504,13 +526,38 @@
           <div class="eyebrow">48 × 48 LED player</div>
           <h2 id="video-name">Player de vídeo</h2>
           <p id="video-help">Inicie um vídeo para escolher de onde ele será reproduzido.</p>
-          <p id="video-audio-status" class="note" role="status">Aguardando áudio do Mac.</p>
-          <div id="video-preview-wrap" hidden>
-            <video id="video-preview" class="video-preview" controls preload="metadata" playsinline
-              aria-label="Prévia do vídeo"></video>
-            <p class="note">Esta prévia mostra o arquivo original. A textura com a paleta ao vivo aparece nos LEDs e na aba Audio palette.</p>
+          <div id="video-launch">
+            <label for="video-file">Vídeo</label>
+            <div class="seek-row">
+              <select id="video-file" aria-label="Vídeo para reproduzir"></select>
+              <button id="video-play" type="button" disabled>▶ Iniciar vídeo</button>
+            </div>
           </div>
+          <p id="video-audio-status" class="note" role="status">Aguardando áudio do Mac.</p>
+          <fieldset id="output-layers" disabled>
+            <h3>Camadas da saída final</h3>
+            <div class="row">
+              <label class="check" for="layer-video"><input id="layer-video" type="checkbox" checked />Vídeo</label>
+              <label class="check" for="layer-audio-palette"><input id="layer-audio-palette" type="checkbox" checked />Audio palette circular</label>
+            </div>
+            <p id="output-layers-status">As duas camadas são combinadas na saída final.</p>
+          </fieldset>
+          <div id="video-led-preview-wrap" hidden>
+            <h3>Saída final · prévia ao vivo dos LEDs</h3>
+            <canvas id="video-led-preview" class="video-led-preview" width="384" height="384"
+              role="img" aria-label="Vídeo com os efeitos enviados aos LEDs"></canvas>
+            <p class="note">Cores e efeitos enviados ao painel, com o brilho ampliado na tela para mostrar os detalhes.</p>
+          </div>
+          <details id="video-preview-wrap" class="video-original" hidden>
+            <summary>Ver vídeo original e escolher um trecho</summary>
+            <video id="video-preview" class="video-preview" controls preload="metadata" playsinline
+              aria-label="Prévia do vídeo original"></video>
+            <p class="note">Este vídeo mostra o arquivo original. A prévia acima acompanha os efeitos enviados aos LEDs.</p>
+          </details>
           <fieldset id="video-controls" disabled>
+            <div class="row">
+              <button id="video-pause" type="button">⏸ Pausar vídeo</button>
+            </div>
             <label for="video-progress" class="range-label">Escolha o momento</label>
             <input id="video-progress" type="range" min="0" max="1" step="0.01" value="0" />
             <div class="video-time"><span id="video-current">00:00</span><span id="video-duration">00:00</span></div>
@@ -550,12 +597,21 @@
         activeTab = null,
         videoEditing = false,
         videoSeeking = false,
+        videoPausing = false,
+        videoPaused = false,
+        layersChanging = false,
+        outputLayers = { video: true, audio_palette: true },
+        videoStarting = false,
         videoConnected = false,
         previewAvailable = false,
         previewStart = 0,
         ignorePreviewSeek = false;
       const context = $("preview").getContext("2d");
       const videoPreview = $("video-preview");
+      const videoLedCanvas = $("video-led-preview");
+      const videoLedContext = videoLedCanvas.getContext("2d");
+      const videoPixelCanvas = document.createElement("canvas");
+      const videoPixelContext = videoPixelCanvas.getContext("2d");
       function setTab(name) {
         activeTab = name;
         for (const tab of ["audio", "video"]) {
@@ -590,6 +646,13 @@
         videoPreview.currentTime = seconds;
         setTimeout(() => { ignorePreviewSeek = false; }, 1000);
       }
+      function renderVideoPauseButton() {
+        const paused = videoConnected ? videoPaused : videoPreview.paused;
+        $("video-pause").textContent = paused ? "▶ Continuar vídeo" : "⏸ Pausar vídeo";
+        $("video-pause").setAttribute("aria-label", paused ? "Continuar vídeo" : "Pausar vídeo");
+      }
+      videoPreview.addEventListener("play", renderVideoPauseButton);
+      videoPreview.addEventListener("pause", renderVideoPauseButton);
       videoPreview.addEventListener("loadedmetadata", () => {
         setPreviewTime(previewStart || 0.001);
       });
@@ -603,8 +666,20 @@
           $("video-current").textContent = formatTime(videoPreview.currentTime);
         }
       });
-      function renderVideo(video, fileAvailable = false) {
+      function renderVideo(video, fileAvailable = false, startAvailable = false, videos = [], starting = false) {
         videoConnected = Boolean(video?.connected);
+        $("video-launch").hidden = Boolean(video);
+        if (JSON.stringify([...$("video-file").options].map(option => option.value)) !== JSON.stringify(videos)) {
+          $("video-file").replaceChildren(...videos.map(name => {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            return option;
+          }));
+        }
+        $("video-file").disabled = !startAvailable || starting || videoStarting;
+        $("video-play").disabled = !startAvailable || !videos.length || starting || videoStarting;
+        $("video-play").textContent = starting || videoStarting ? "Iniciando…" : "▶ Iniciar vídeo";
         if (fileAvailable && !previewAvailable) {
           previewAvailable = true;
           previewStart = video?.position || 0;
@@ -616,23 +691,50 @@
           videoPreview.load();
         }
         $("video-preview-wrap").hidden = !fileAvailable;
-        $("video-controls").disabled = !video || videoSeeking;
+        $("video-led-preview-wrap").hidden = !videoConnected;
+        $("video-controls").disabled = !video || videoSeeking || videoPausing;
+        $("video-pause").disabled = !videoConnected && !fileAvailable;
+        $("output-layers").disabled = !videoConnected || layersChanging;
+        if (!layersChanging) {
+          outputLayers = video?.layers ?? { video: true, audio_palette: true };
+          $("layer-video").checked = outputLayers.video;
+          $("layer-audio-palette").checked = outputLayers.audio_palette;
+        }
+        $("layer-audio-palette").disabled = !video?.audio_reactive?.enabled;
+        $("output-layers-status").textContent = outputLayers.video
+          ? outputLayers.audio_palette && video?.audio_reactive?.enabled
+            ? "Vídeo + audio palette circular na saída final."
+            : "Somente a camada de vídeo na saída final."
+          : outputLayers.audio_palette && video?.audio_reactive?.enabled
+            ? "Somente a audio palette circular na saída final."
+            : "Todas as camadas desligadas · saída preta.";
         if (!video) {
           $("video-name").textContent = "Player de vídeo";
-          $("video-help").textContent = "Inicie um vídeo para escolher o ponto de reprodução.";
-          $("video-message").textContent = "Nenhum vídeo conectado.";
+          $("video-help").textContent = "Escolha um vídeo e aperte play para reproduzir nos LEDs.";
+          $("video-message").textContent = refreshError || (starting || videoStarting ? "Iniciando vídeo…"
+            : startAvailable && videos.length ? "Pronto para iniciar. O vídeo será repetido ao chegar ao fim."
+            : "Nenhum vídeo disponível para iniciar.");
           return;
         }
         $("video-name").textContent = video.name;
-        $("video-help").textContent = video.connected
-          ? `Reproduzindo na matriz de LEDs a ${video.fps.toFixed(2)} FPS.`
-          : "Prévia no navegador; o painel de LEDs está desconectado.";
+        if (!videoPausing) {
+          videoPaused = Boolean(video.paused);
+          if (videoConnected && videoPaused) videoPreview.pause();
+          renderVideoPauseButton();
+        }
         const reactive = video.audio_reactive;
-        $("video-audio-status").textContent = !reactive?.enabled
+        $("video-help").textContent = !video.connected
+          ? "Prévia no navegador; o painel de LEDs está desconectado."
+          : reactive?.enabled
+            ? `Movimento do vídeo: ${video.content_fps.toFixed(1)} FPS · envio aos LEDs: ${video.fps.toFixed(2)} FPS.`
+            : `Reproduzindo na matriz de LEDs a ${video.fps.toFixed(2)} FPS.`;
+        $("video-audio-status").textContent = video.connected && !outputLayers.audio_palette
+          ? "Camada de áudio desligada."
+          : !reactive?.enabled
           ? "Textura de áudio ao vivo indisponível nesta prévia."
           : reactive.audible
             ? `Áudio do Mac ativo · energia ${Math.round(reactive.energy * 100)}% · saturação ${Math.round(reactive.saturation * 100)}%.`
-            : "Aguardando música no áudio do Mac · vídeo em cores calmas.";
+            : "Aguardando música no áudio do Mac · paleta circular em cores calmas.";
         $("video-progress").max = Math.max(0, video.duration - 1 / video.fps);
         if (!videoEditing) {
           const position = !video.connected && videoPreview.readyState >= 1
@@ -644,16 +746,18 @@
         $("video-message").textContent = !video.connected
           ? "Escolha um trecho na prévia ou na linha do tempo."
           : video.seeking ? "Indo para o momento escolhido…"
+          : video.paused ? "Vídeo pausado."
           : video.playing ? "Vídeo tocando nos LEDs." : "Reprodução concluída.";
       }
       async function seekVideo(seconds, syncPreview = true, playPreview = false) {
-        if (videoSeeking) return;
+        if (videoSeeking || videoPausing) return;
         videoSeeking = true;
         $("video-controls").disabled = true;
         $("video-message").textContent = "Indo para o momento escolhido…";
         try {
           if (syncPreview) setPreviewTime(seconds);
-          if (playPreview && previewAvailable) videoPreview.play().catch(() => {});
+          if (playPreview && previewAvailable && (!videoConnected || !videoPaused))
+            videoPreview.play().catch(() => {});
           const data = await request("/api/video/seek", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -684,6 +788,97 @@
         if (event.key === "Enter") $("video-seek").click();
       });
       $("video-restart").addEventListener("click", () => seekVideo(0, true, true));
+      async function toggleLayer(layer, checkbox) {
+        if (layersChanging) return;
+        layersChanging = true;
+        $("output-layers").disabled = true;
+        try {
+          const data = await request("/api/video/layers", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ [layer]: checkbox.checked }),
+          });
+          layersChanging = false;
+          renderVideo(data.video, previewAvailable);
+        } catch (error) {
+          checkbox.checked = outputLayers[layer];
+          $("video-message").textContent = error.message;
+        } finally {
+          layersChanging = false;
+          $("output-layers").disabled = !videoConnected;
+        }
+      }
+      $("layer-video").addEventListener("change", () => toggleLayer("video", $("layer-video")));
+      $("layer-audio-palette").addEventListener("change", () => toggleLayer("audio_palette", $("layer-audio-palette")));
+      $("video-pause").addEventListener("click", async () => {
+        if (videoPausing || videoSeeking) return;
+        if (!videoConnected) {
+          try {
+            if (videoPreview.paused) {
+              $("video-preview-wrap").open = true;
+              await videoPreview.play();
+            } else videoPreview.pause();
+            renderVideoPauseButton();
+          } catch (error) { $("video-message").textContent = error.message; }
+          return;
+        }
+        videoPausing = true;
+        $("video-controls").disabled = true;
+        try {
+          const data = await request("/api/video/playback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paused: !videoPaused }),
+          });
+          videoPausing = false;
+          renderVideo(data.video, previewAvailable);
+          if (previewAvailable && !data.video.paused) {
+            setPreviewTime(data.video.position);
+            videoPreview.play().catch(() => {});
+          }
+        } catch (error) {
+          $("video-message").textContent = error.message;
+        } finally {
+          videoPausing = false;
+          $("video-controls").disabled = false;
+        }
+      });
+      $("video-play").addEventListener("click", async () => {
+        if (videoStarting || refreshing) return;
+        videoStarting = true;
+        refreshError = null;
+        $("video-play").disabled = true;
+        $("video-file").disabled = true;
+        $("refresh").disabled = true;
+        $("controls").disabled = true;
+        $("video-play").textContent = "Iniciando…";
+        $("video-message").textContent = "Abrindo vídeo e conectando ao painel…";
+        try {
+          const previous = await request("/api/video/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ video: $("video-file").value }),
+          });
+          const deadline = Date.now() + 45000;
+          while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            let current;
+            try { current = await request("/api/state"); } catch { continue; }
+            if (current.session && current.session !== previous.session) {
+              if (current.mode !== "video") throw new Error("Não foi possível iniciar o vídeo. Tente novamente.");
+              setTab("video");
+              window.location.reload();
+              return;
+            }
+          }
+          throw new Error("Não foi possível abrir o vídeo. Confira a conexão USB do painel.");
+        } catch (error) {
+          videoStarting = false;
+          refreshError = error.message;
+          $("video-message").textContent = error.message;
+          status(error.message, "error");
+        }
+      });
       function status(message, state = "live") {
         $("status").textContent = message;
         $("status").dataset.state = state;
@@ -730,6 +925,28 @@
             context.fill();
           }),
         );
+      }
+      function drawVideoLed(frame) {
+        if (!frame?.length || !frame[0]?.length) return;
+        const rows = frame.length;
+        const columns = frame[0].length;
+        if (videoPixelCanvas.width !== columns) videoPixelCanvas.width = columns;
+        if (videoPixelCanvas.height !== rows) videoPixelCanvas.height = rows;
+        const pixels = videoPixelContext.createImageData(columns, rows);
+        for (let y = 0; y < rows; y++) {
+          for (let x = 0; x < columns; x++) {
+            const rgb = frame[y][x];
+            const offset = (y * columns + x) * 4;
+            pixels.data[offset] = Math.min(255, rgb[0] * 12);
+            pixels.data[offset + 1] = Math.min(255, rgb[1] * 12);
+            pixels.data[offset + 2] = Math.min(255, rgb[2] * 12);
+            pixels.data[offset + 3] = 255;
+          }
+        }
+        videoPixelContext.putImageData(pixels, 0, 0);
+        videoLedContext.imageSmoothingEnabled = false;
+        videoLedContext.drawImage(videoPixelCanvas, 0, 0,
+                                  videoLedCanvas.width, videoLedCanvas.height);
       }
       function markSelection() {
         $("palette-name").textContent = names[settings.preset];
@@ -955,29 +1172,32 @@
         }
       });
       async function poll() {
-        if (refreshing) {
+        const pollStarted = performance.now();
+        if (refreshing || videoStarting) {
           setTimeout(poll, 250);
           return;
         }
         const version = editVersion;
         try {
           const data = await request("/api/state");
-          if (refreshing) { setTimeout(poll, 250); return; }
+          if (refreshing || videoStarting) { setTimeout(poll, 250); return; }
           if (activeTab === null) setTab(location.hash === "#audio" ? "audio"
             : data.mode === "video" || location.hash === "#video" ? "video" : "audio");
           const videoMode = data.mode === "video";
           const reactiveVideo = videoMode && Boolean(data.video?.audio_reactive?.enabled);
+          const mappedVideo = reactiveVideo && (data.video?.layers?.audio_palette ?? true);
           $("audio-tab").disabled = videoMode && !reactiveVideo;
-          renderVideo(data.video, data.video_file_available);
+          renderVideo(data.video, data.video_file_available, data.video_start_available, data.videos, data.video_starting);
           if (videoMode) {
             $("app-eyebrow").textContent = "LED studio / vídeo";
             $("app-title").textContent = "Player de vídeo";
             $("app-description").textContent = data.video?.connected
-              ? "Escolha o momento do vídeo e ajuste a paleta na aba Audio palette."
+              ? "Ligue ou desligue cada camada da saída final e ajuste a paleta na aba Audio palette."
               : "Explore o vídeo e escolha momentos sem conectar o painel.";
-            $("preview-description").textContent = "Textura de vídeo com cores e saturação do áudio ao vivo.";
+            $("preview-description").textContent = "Saída final com as camadas habilitadas, enviada aos LEDs.";
             $("preview-note").textContent = "A prévia amplia os valores de brilho para mostrar os detalhes; os limites de segurança continuam ativos nos LEDs.";
-            $("slowdown-help").textContent = "Suaviza a resposta das cores à música. A velocidade do vídeo não muda.";
+            $("slowdown-help").textContent = "Controla a velocidade das ondas. A reação ao áudio continua imediata em cada quadro.";
+            $("palette-adaptive").textContent = "Quiet music brings dark purple and blue. Medium energy shows red and green. Strong energy moves to orange and yellow. Colors and texture respond to the current audio on every frame.";
           } else {
             $("app-eyebrow").textContent = "System audio / LED studio";
             $("app-title").textContent = "Live palette";
@@ -985,6 +1205,7 @@
             $("preview-description").textContent = "The live frame sent to your LEDs.";
             $("preview-note").textContent = "The preview stays dark when audio is silent. Brightness adjusts the palette; the music still controls each note’s glow.";
             $("slowdown-help").textContent = "Slide right to slow the motion, left to speed it up. Frames blend smoothly in between. Wave mode adds thicker sine and cosine curves.";
+            $("palette-adaptive").textContent = "Sections near the song’s recent maximum energy and peak dB glow with warm, vivid colors. Quieter sections drift toward a darker, softer Ocean palette of blue, cyan, and teal. Colors follow the music, the brightness slider sets the intensity, and Slowdown makes the transitions more gradual.";
           }
           $("refresh").disabled = videoMode || !data.refresh_available;
           $("controls").disabled = videoMode && !reactiveVideo;
@@ -1001,10 +1222,14 @@
               revision = data.revision;
               renderSettings();
             }
-            draw(data);
+            if (activeTab === "video" && videoMode && data.video?.connected) drawVideoLed(data.frame);
+            else if (activeTab === "audio") draw(data);
             if (refreshError) status(refreshError, "error");
             else status(videoMode
-              ? data.video?.connected ? "● Vídeo e áudio ao vivo nos LEDs" : "● Prévia sem painel"
+              ? data.video?.connected ? outputLayers.video
+                ? mappedVideo ? "● Vídeo + paleta circular nos LEDs" : "● Vídeo nos LEDs"
+                : mappedVideo ? "● Paleta circular nos LEDs" : "● Saída desligada"
+                : "● Prévia sem painel"
               : "● Live · controls synced");
           }
           if (pending && !sending) flush();
@@ -1012,7 +1237,9 @@
           status("Disconnected · waiting for visualizer", "error");
           $("refresh").disabled = true;
         }
-        setTimeout(poll, activeTab === "video" ? 250 : 33);
+        const interval = activeTab === "video" && !videoConnected ? 250
+          : videoConnected ? 16 : 33;
+        setTimeout(poll, Math.max(0, interval - (performance.now() - pollStarted)));
       }
       poll();
     </script>

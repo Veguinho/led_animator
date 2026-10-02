@@ -35,6 +35,260 @@ class FakeSerial:
 
 
 class StreamingProtocolTests(unittest.TestCase):
+    def test_video_pause_keeps_position_and_resumes_without_dropping_frames(self):
+        controls = VideoPlaybackControls("clip.mp4", 60, 10)
+        now = [0.0]
+        sent_frames = []
+        paused_positions = []
+        source = stream_arduino.FrameSource(
+            10, lambda: iter([bytes([value]) * 512 for value in (1, 2, 3)]),
+        )
+
+        def send(_connection, _type, _sequence, payload, *_args):
+            sent_frames.append((payload[0], now[0]))
+            if len(sent_frames) == 1:
+                controls.set_paused(True)
+
+        def sleep(seconds):
+            now[0] += seconds
+            if controls.is_paused():
+                paused_positions.append(controls.state()["position"])
+                self.assertEqual(len(sent_frames), 1)
+                if now[0] >= 2:
+                    controls.set_paused(False)
+
+        with (
+            mock.patch.object(stream_arduino.time, "monotonic", side_effect=lambda: now[0]),
+            mock.patch.object(stream_arduino.time, "sleep", side_effect=sleep),
+            mock.patch.object(stream_arduino, "exchange_packet", side_effect=send),
+        ):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=True, controls=controls,
+            )
+        self.assertEqual(result, (3, 0))
+        self.assertEqual([frame for frame, _ in sent_frames], [1, 2, 3])
+        self.assertTrue(paused_positions)
+        self.assertEqual(set(paused_positions), {0.0})
+        self.assertAlmostEqual(sent_frames[2][1] - sent_frames[1][1], 0.1)
+
+    def test_paused_video_keeps_composing_and_publishing_output_layers(self):
+        controls = VideoPlaybackControls("clip.mp4", 60, 10)
+        now = [0.0]
+        sent_frames, prepared_frames, published = [], [], []
+
+        def prepare(raw):
+            prepared_frames.append(raw[0])
+            visible = controls.output_layers()["video"]
+            return raw if visible else bytes(len(raw))
+
+        source = stream_arduino.FrameSource(
+            10, lambda: iter([bytes([value]) * 512 for value in (1, 2, 3)]),
+            prepare_frame=prepare, on_frame_sent=published.append,
+        )
+
+        def send(_connection, _type, sequence, payload, *_args):
+            sent_frames.append((sequence, payload[0]))
+            if len(sent_frames) == 1:
+                controls.set_paused(True)
+                controls.set_layers({"video": False})
+            elif len(sent_frames) == 2:
+                self.assertEqual(controls.state()["position"], 0)
+                controls.set_layers({"video": True})
+            elif len(sent_frames) == 3:
+                self.assertEqual(controls.state()["position"], 0)
+                controls.set_paused(False)
+
+        with (
+            mock.patch.object(stream_arduino.time, "monotonic", side_effect=lambda: now[0]),
+            mock.patch.object(stream_arduino.time, "sleep", side_effect=lambda dt: now.__setitem__(0, now[0] + dt)),
+            mock.patch.object(stream_arduino, "exchange_packet", side_effect=send),
+        ):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=True, controls=controls,
+            )
+        self.assertEqual(result, (5, 0))
+        self.assertEqual(prepared_frames, [1, 1, 1, 2, 3])
+        self.assertEqual(sent_frames, [(1, 1), (2, 0), (3, 1), (4, 2), (5, 3)])
+        self.assertEqual([frame[0] for frame in published], [1, 0, 1, 2, 3])
+        self.assertEqual(controls.state()["position"], 60)
+
+    def test_seek_while_paused_waits_for_resume_before_sending(self):
+        controls = VideoPlaybackControls("clip.mp4", 60, 10)
+        controls.set_paused(True)
+        controls.seek(5)
+        frames_at = mock.Mock(side_effect=lambda seconds: iter([bytes([int(seconds)]) * 512]))
+        source = stream_arduino.FrameSource(10, lambda: frames_at(0), 16, frames_at)
+        with (
+            mock.patch.object(stream_arduino.time, "sleep", side_effect=lambda _: controls.set_paused(False)),
+            mock.patch.object(stream_arduino, "exchange_packet") as send,
+        ):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=True, controls=controls,
+            )
+        self.assertEqual(result, (1, 0))
+        self.assertEqual(send.call_args.args[3], bytes([5]) * 512)
+        self.assertEqual([call.args[0] for call in frames_at.call_args_list], [0, 5])
+
+    def test_live_audio_is_prepared_after_pacing_and_not_for_dropped_frames(self):
+        now = [0.0]
+        events = []
+
+        def frames():
+            for timestamp, value in ((0.0, 1), (0.01, 2), (0.35, 3), (0.35, 4)):
+                now[0] = timestamp
+                yield bytes([value]) * 512
+
+        def prepare(frame):
+            events.append(("audio", frame[0], now[0]))
+            return frame
+
+        def send(_connection, _type, _sequence, payload, *_args):
+            events.append(("usb", payload[0], now[0]))
+
+        def publish(frame):
+            events.append(("preview", frame[0], now[0]))
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        source = stream_arduino.FrameSource(
+            10, frames, prepare_frame=prepare, on_frame_sent=publish,
+        )
+        with (
+            mock.patch.object(stream_arduino.time, "monotonic", side_effect=lambda: now[0]),
+            mock.patch.object(stream_arduino.time, "sleep", side_effect=sleep),
+            mock.patch.object(stream_arduino, "exchange_packet", side_effect=send),
+        ):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0, drop_late=True,
+            )
+        self.assertEqual(result, (3, 1))
+        self.assertEqual([event[:2] for event in events], [
+            (kind, frame) for frame in (1, 2, 4) for kind in ("audio", "usb", "preview")
+        ])
+        self.assertAlmostEqual(events[3][2], 0.1)
+        self.assertAlmostEqual(events[6][2], 0.35)
+
+    def test_video_source_decoding_defers_audio_and_preserves_rgb_precision(self):
+        frame = np.full((16, 16, 3), [4, 5, 6], dtype=np.uint8)
+        texture = mock.Mock()
+        texture.apply.side_effect = lambda grid, **_kwargs: grid
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(stream_arduino, "probe_video", return_value=VideoInfo(16, 16, 30)),
+            mock.patch.object(stream_arduino, "iter_square_video_frames", return_value=iter([frame])),
+        ):
+            source = open_video(Path("clip.mp4"), led_gamma=1, texture=texture)
+            raw = next(source.iter_frames())
+        texture.apply.assert_not_called()
+        texture.publish_frame.assert_not_called()
+        np.testing.assert_array_equal(np.frombuffer(raw, dtype=np.uint8).reshape(frame.shape), frame)
+        payload = source.prepare_frame(raw)
+        np.testing.assert_array_equal(texture.apply.call_args.args[0], frame)
+        texture.publish_frame.assert_not_called()
+        source.on_frame_sent(payload)
+        np.testing.assert_array_equal(texture.publish_frame.call_args.args[0],
+                                      stream_arduino.decode_rgb565_frame(payload, 16))
+
+    def test_rising_activity_releases_video_hold_immediately(self):
+        hold = stream_arduino.AdaptiveVideoFrameHold()
+        hold.select(np.array([1]), 10, 30)
+        self.assertEqual(int(hold.select(np.array([2]), 10, 30)[0]), 1)
+        self.assertEqual(int(hold.select(np.array([3]), 29, 30)[0]), 3)
+
+    def test_seek_during_frame_wait_does_not_send_the_old_image(self):
+        controls = VideoPlaybackControls("clip.mp4", 60, 10)
+        frames_at = lambda seconds: iter([bytes([3]) * 512] if seconds else
+                                         [bytes([1]) * 512, bytes([2]) * 512])
+        prepare = mock.Mock(side_effect=lambda payload: payload)
+        source = stream_arduino.FrameSource(10, lambda: frames_at(0), 16,
+                                           frames_at, prepare_frame=prepare)
+        with (
+            mock.patch.object(stream_arduino.time, "monotonic", return_value=0),
+            mock.patch.object(stream_arduino.time, "sleep", side_effect=lambda _: controls.seek(5)),
+            mock.patch.object(stream_arduino, "exchange_packet"),
+        ):
+            result = stream_arduino.stream_frames(
+                mock.Mock(), source, loop=False, timeout=1, retries=0,
+                drop_late=True, controls=controls,
+            )
+        self.assertEqual(result, (2, 0))
+        self.assertEqual([call.args[0][0] for call in prepare.call_args_list], [1, 3])
+
+    def test_audio_video_holds_images_but_refreshes_texture_each_panel_frame(self):
+        frames = [np.full((2, 2, 3), 100 + value * 15, dtype=np.uint8)
+                  for value in range(8)]
+        controls = VideoPlaybackControls("clip.mp4", 60, 4)
+        controls.set_content_fps(1)
+
+        class Texture:
+            video_controls = controls
+            seen: list[int] = []
+
+            def apply(self, frame, *, select_frame=None):
+                if select_frame is not None:
+                    frame = select_frame(frame)
+                self.seen.append(int(frame[0, 0, 0]))
+                return frame
+
+            def publish_frame(self, _frame):
+                pass
+
+        texture = Texture()
+        with (
+            mock.patch.object(stream_arduino, "probe_video",
+                              return_value=VideoInfo(2, 2, 4)),
+            mock.patch.object(stream_arduino, "iter_square_video_frames",
+                              return_value=iter(frames)),
+        ):
+            payloads = list(stream_arduino.iter_compiled_video(
+                Path("clip.mp4"), 4, 4, size=2, texture=texture,
+            ))
+        self.assertEqual(texture.seen, [100, 100, 100, 100, 160, 160, 160, 160])
+        self.assertEqual(len(payloads), 8)
+        self.assertEqual(payloads[0], payloads[3])
+        self.assertNotEqual(payloads[3], payloads[4])
+
+    def test_video_hold_fractional_rate_does_not_halve_near_full_speed(self):
+        hold = stream_arduino.AdaptiveVideoFrameHold()
+        selected = [int(hold.select(np.array([index]), 29, 30)[0])
+                    for index in range(120)]
+        changes = sum(left != right for left, right in zip(selected, selected[1:]))
+        self.assertGreater(changes, 110)
+        self.assertLess(changes, 119)
+
+    def test_video_preview_uses_encoded_led_colors(self):
+        frame = np.full((2, 2, 3), [4, 5, 6], dtype=np.uint8)
+
+        class Texture:
+            video_controls = VideoPlaybackControls("clip.mp4", 60, 24)
+            published: np.ndarray | None = None
+
+            def apply(self, value, *, select_frame=None):
+                return select_frame(value) if select_frame is not None else value
+
+            def publish_frame(self, value):
+                self.published = value
+
+        texture = Texture()
+        with (
+            mock.patch.object(stream_arduino, "probe_video",
+                              return_value=VideoInfo(2, 2, 24)),
+            mock.patch.object(stream_arduino, "iter_square_video_frames",
+                              return_value=iter([frame])),
+        ):
+            payload = next(stream_arduino.iter_compiled_video(
+                Path("clip.mp4"), 24, 24, led_gamma=1, size=2,
+                texture=texture,
+            ))
+        np.testing.assert_array_equal(
+            texture.published, stream_arduino.decode_rgb565_frame(payload, 2),
+        )
+        self.assertFalse(np.array_equal(texture.published, frame))
+
     def test_default_video_rate_matches_source(self):
         args = stream_arduino.build_parser().parse_args(["sample.mp4"])
         self.assertIsNone(args.fps)

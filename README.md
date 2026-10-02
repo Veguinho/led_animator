@@ -10,7 +10,9 @@ through LCD_CAM. Preloaded video uses a separate firmware. The live video
 player opens a local **Video** tab at `http://127.0.0.1:8765/#video` for
 timeline and exact-time seeking. Live Mac audio colors the video texture and
 changes its brightness and saturation; the **Audio palette** tab adjusts the
-colors while the video plays. Run `python video_app.py VIDEO.mp4` to use its
+colors while the video plays. In **Vídeo**, click **Desligar texture mapping**
+to play with the original colors and normal video speed; **Ligar texture mapping**
+restores the live audio effects. Run `python video_app.py VIDEO.mp4` to use its
 browser preview without connecting the LED board.
 Viewed from the front, the panel layout is:
 

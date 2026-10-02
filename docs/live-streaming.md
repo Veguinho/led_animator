@@ -43,16 +43,67 @@ python3 stream_arduino.py 'wex.muzik PARTAE.square.mp4' --clear-on-exit
 ```
 
 The live video player captures Mac system audio. Its **Audio palette** tab
-controls the colors mapped onto the video while the original image texture
-remains visible. The adaptive preset starts with cooler, softer colors during
-quiet passages and becomes brighter and more saturated as the music grows.
+controls an independent layer of colors in concentric circles. The **Vídeo**
+tab has **Camadas da saída final** switches for **Vídeo** and **Audio palette
+circular**. Enable both to screen-blend them, enable either one to show it
+alone, or disable both for black output. The palette renders independently of
+the video image, including over black pixels. Its brightness and saturation
+controls affect only the audio layer. Layer switches preserve the playback
+position and palette settings. Pausing freezes the video while the audio layer
+and final output keep refreshing.
+Music moves a gentle outgoing wave, a softer reflection, and a faint harmonic
+through the circular palette. The **Slowdown** slider also slows this movement.
+Bass gives the outer ring more movement and glow; mids occupy the middle, and
+higher frequencies move the response toward the center. The video adaptive
+palette is dark purple and blue at low energy, red and green in the middle,
+and orange and yellow at high energy. Color, brightness, and transparency
+react at the center on the next transmitted frame, then spread outward with
+a soft front that decelerates toward the edges. The front reaches the corners
+in 0.7–1.4 seconds, depending on **Slowdown**. Falling energy releases with a
+0.42–0.60-second time constant, keeping strong bass and short gaps from
+flashing the whole overlay between cool and warm colors. The spectrum uses the latest 1,024
+samples (21.3 ms at 48 kHz); amplitude uses only the latest 256 (5.3 ms).
+**Slowdown** changes wave travel and release, without delaying the central attack.
+The upper outer ring bends gently with the current audio waveform and settles back
+in silence. Over video, the audio palette blends at 45% strength in calm sections;
+its local opacity rises gently with the expanding pulse to preserve
+the source detail; the palette keeps its full strength when shown alone.
+Immediate audio response is the default for video motion. Use
+`--audio-response smooth` to ease that motion's energy and band controls.
+Both modes use the same immediate central attack and soft outward release
+for the overlay.
 The player loads and saves the same `.build/audio-palette.json` settings used
 by the live audio visualizer, so palette changes carry between modes.
 The MP4 has no audio track, so play music through the Mac for this response.
-The hardware brightness and flash limits still apply after the color mapping.
-Use `--no-audio-reactive` to play the video's original colors.
+The hardware brightness and flash limits still apply after composing the final output.
+Disable **Audio palette circular** to show the video's original colors and
+motion rate. Use `--no-audio-reactive` to start without audio capture; the
+**Vídeo** layer switch remains available.
+
+When the music is quieter and bass recedes, the Mac holds decoded video images
+longer, reducing apparent video motion toward 10 FPS. Energetic bass brings the
+motion back toward the source frame rate on the same frame; rising activity
+immediately releases the held image. The audio texture keeps updating and
+the LED stream stays at the same rate, so the timeline and firmware timing do
+not change. The Video tab shows both the current video motion FPS and the LED
+stream FPS.
+
+The host samples audio after waiting for the frame's send deadline and after
+discarding late video frames. The preview publishes only acknowledged frames
+and polls at up to 60 Hz during live video. Capture, frame cadence (33.4 ms
+at 29.97 FPS), USB transfer and LED scanout still impose physical latency;
+the central attack adds no envelope delay, while the outward travel is a visual effect.
 
 The player opens the local control app at `http://127.0.0.1:8765/#video`.
+From the audio app, open **Vídeo**, choose a file, and click **▶ Iniciar vídeo**.
+The list includes MP4s in the project root and `video_clips`, with square
+videos listed first. The app closes the audio stream before starting the video
+on the same USB controller and reconnects in the same browser tab. Videos
+started with this button repeat when they reach the end.
+The Video tab shows the live 48×48 final output after composing the enabled
+layers and applying video brightness limiting. Screen brightness is boosted in this preview so
+dark LED details remain visible. Expand **Ver vídeo original e escolher um
+trecho** to inspect or seek within the untouched source file.
 In the **Video** tab, drag the timeline or enter `MM:SS` / `HH:MM:SS` and
 choose **Play from here**. **Start over** returns to the beginning. Seeking
 restarts FFmpeg at the selected point while keeping the LED serial connection
