@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from video_controls import VideoPlaybackControls
+from board_controls import BoardResetControls
 
 
 PRESETS = {
@@ -216,6 +217,7 @@ class PaletteServer:
         video_path: Path | None = None,
         on_video_start: Callable[[Path], None] | None = None,
         video_library: dict[str, Path] | None = None,
+        board_controls: BoardResetControls | None = None,
     ) -> None:
         if video_path is not None and not video_path.is_file():
             raise ValueError(f"video does not exist: {video_path}")
@@ -234,6 +236,8 @@ class PaletteServer:
                 "video_start_available": on_video_start is not None,
                 "videos": list(library),
                 "video_starting": launching,
+                "board_reset_available": board_controls is not None,
+                "board_reset": board_controls.state() if board_controls is not None else None,
             }
 
         class Handler(BaseHTTPRequestHandler):
@@ -321,7 +325,7 @@ class PaletteServer:
 
             def do_POST(self) -> None:
                 nonlocal launching
-                if self.path not in ("/api/palette", "/api/refresh", "/api/video/seek", "/api/video/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
+                if self.path not in ("/api/palette", "/api/refresh", "/api/boards/reset", "/api/video/seek", "/api/video/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
@@ -337,9 +341,9 @@ class PaletteServer:
                     if not 0 < length <= 4096:
                         raise ValueError("invalid request size")
                     payload = json.loads(self.rfile.read(length))
-                    if self.path == "/api/refresh":
+                    if self.path in ("/api/refresh", "/api/boards/reset"):
                         if payload != {}:
-                            raise ValueError("refresh expects an empty JSON object")
+                            raise ValueError("this action expects an empty JSON object")
                     elif self.path == "/api/video/start":
                         if on_video_start is None:
                             self.json_response(503, {"error": "video launch is unavailable"})
@@ -375,6 +379,12 @@ class PaletteServer:
                     return
                 except OSError:
                     self.json_response(500, {"error": "could not save palette settings"})
+                    return
+                if self.path == "/api/boards/reset":
+                    if board_controls is None:
+                        self.json_response(503, {"error": "no LED board is connected"})
+                        return
+                    self.json_response(202, {"board_reset": board_controls.request()})
                     return
                 if self.path == "/api/video/start":
                     with launch_lock:

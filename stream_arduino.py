@@ -29,6 +29,7 @@ from led_animator import (
     probe_video,
 )
 from video_controls import VideoPlaybackControls
+from board_controls import BoardResetControls
 from video_audio_texture import LiveAudioVideoTexture
 
 
@@ -77,6 +78,8 @@ HELLO = struct.Struct("<BBBBI")
 
 
 class SerialConnection(Protocol):
+    dtr: bool
+    rts: bool
     def read(self, size: int = 1) -> bytes: ...
     def write(self, data: bytes) -> int | None: ...
     def flush(self) -> None: ...
@@ -538,6 +541,25 @@ def resize_rgb565(payload: bytes, source_size: int, display_size: int) -> bytes:
     return pixels[indices[:, None], indices[None, :]].astype("<u2").tobytes()
 
 
+def reset_board(
+    connection: SerialConnection, fps: float, timeout: float, retries: int,
+    display_size: int, *, video_mode: bool = False,
+) -> None:
+    """Pulse the CH340's reset line, then restore the streaming protocol."""
+    # Espressif's hard reset sequence: keep IO0 high and pulse EN low.
+    # https://github.com/espressif/esptool/blob/v4.8.1/esptool/reset.py
+    connection.dtr = False
+    try:
+        connection.rts = True
+        time.sleep(0.1)
+    finally:
+        connection.rts = False
+    time.sleep(0.5)
+    connection.reset_input_buffer()
+    handshake(connection, fps, timeout, max(retries, 3), display_size,
+              video_mode=video_mode)
+
+
 def add_display_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--baud", type=int, default=SERIAL_BAUD,
                         choices=(230400, 460800, 921600, 1000000, 1500000, 2000000),
@@ -561,6 +583,8 @@ def stream_frames(
     compress: bool = False,
     start_seconds: float = 0.0,
     controls: VideoPlaybackControls | None = None,
+    board_controls: BoardResetControls | None = None,
+    video_mode: bool = False,
 ) -> tuple[int, int]:
     if drop_late and rebase_late:
         raise ValueError("drop_late and rebase_late cannot both be enabled")
@@ -573,6 +597,20 @@ def stream_frames(
     stats_sent = 0
     pass_start_seconds = start_seconds
     last_raw_frame: bytes | None = None
+
+    def check_board_reset(*, adjust_clock: bool = True) -> bool:
+        nonlocal pass_start
+        if board_controls is None:
+            return False
+        started = time.monotonic()
+        processed = board_controls.process(lambda: reset_board(
+            connection, source.fps, timeout, retries, display_size,
+            video_mode=video_mode,
+        ))
+        if processed and adjust_clock and pass_start is not None:
+            # Exclude reboot time from playback so the video never skips ahead.
+            pass_start += time.monotonic() - started
+        return processed
 
     def send_output(raw: bytes) -> None:
         nonlocal sent, timeline_index
@@ -600,10 +638,11 @@ def stream_frames(
         while controls.is_paused():
             if paused_at is None:
                 paused_at = time.monotonic()
+            reset_processed = check_board_reset(adjust_clock=False)
             seek = controls.take_seek()
             if seek is not None:
                 return seek
-            if source.prepare_frame is not None and last_raw_frame is not None:
+            if last_raw_frame is not None and (source.prepare_frame is not None or reset_processed):
                 # Freeze the video timeline, while audio and layer switches
                 # continue to refresh the final output at the panel rate.
                 refresh_start = time.monotonic()
@@ -626,6 +665,7 @@ def stream_frames(
                   if source.iter_frames_at is not None else source.iter_frames())
         try:
             for payload in frames:
+                check_board_reset()
                 if last_raw_frame is None and source.prepare_frame is not None:
                     last_raw_frame = payload
                 seek_to = check_video_controls()
@@ -784,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
     connection: SerialConnection | None = None
     control_server = None
     capture = None
+    board_controls = BoardResetControls()
     try:
         duration = probe_video_duration(args.video)
         video_fps = probe_video(args.video).fps
@@ -830,7 +871,8 @@ def main(argv: list[str] | None = None) -> int:
                   args.display_size,
                   video_mode=args.display_size == 48 and not args.no_flash_limit)
         control_server = PaletteServer(palette_controls, args.controls_port,
-                                       video_controls=controls, video_path=args.video)
+                                       video_controls=controls, video_path=args.video,
+                                       board_controls=board_controls)
         control_server.start()
         print(f"Video controls: {control_server.url}/#video", file=sys.stderr)
         if not args.no_browser:
@@ -851,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
             compress=args.display_size == 48 and not args.no_compression,
             start_seconds=args.start,
             controls=controls,
+            board_controls=board_controls,
+            video_mode=args.display_size == 48 and not args.no_flash_limit,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
         return 0

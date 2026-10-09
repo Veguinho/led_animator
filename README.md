@@ -14,6 +14,9 @@ colors while the video plays. In **Vídeo**, click **Desligar texture mapping**
 to play with the original colors and normal video speed; **Ligar texture mapping**
 restores the live audio effects. Run `python video_app.py VIDEO.mp4` to use its
 browser preview without connecting the LED board.
+The **Reset boards** button in the app header restarts the LED controller and
+resumes playback with the current palette and video position. It is available
+in live audio and video mode when the controller is connected.
 Viewed from the front, the panel layout is:
 
 ```text

@@ -10,21 +10,24 @@ import numpy as np
 class AdaptiveAudioEnergy:
     """Track how energetic the current passage is relative to recent music."""
 
-    def __init__(self, sample_rate: int = 48_000, fft_size: int = 2_048) -> None:
+    def __init__(
+        self, sample_rate: int = 48_000, fft_size: int = 2_048, *,
+        bands: tuple[tuple[float, float], ...] = ((45, 250), (250, 2500), (2500, 16000)),
+    ) -> None:
         self.fft_size = fft_size
         self.window = np.hanning(fft_size).astype(np.float32)
         self._power_scale = 2.0 / (fft_size * np.square(self.window).sum())
         frequencies = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
         self.masks = [
             (frequencies >= low) & (frequencies < high)
-            for low, high in ((45, 250), (250, 2500), (2500, 16000))
+            for low, high in bands
         ]
         self.reset()
 
     def reset(self) -> None:
         self.energy = 0.0
         self.colorful = 0.0
-        self.band_amplitudes = np.zeros(3, dtype=np.float64)
+        self.band_amplitudes = np.zeros(len(self.masks), dtype=np.float64)
         self.history: deque[tuple[float, float, float]] = deque()
         self._rms_maxima: deque[tuple[float, float]] = deque()
         self._peak_maxima: deque[tuple[float, float]] = deque()

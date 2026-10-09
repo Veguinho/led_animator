@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from brightness_envelope import BrightnessEnvelope
+from board_controls import BoardResetControls
 
 from audio_palette_controls import DEFAULT_SLOWDOWN, PaletteControls, PaletteServer, default_settings, make_adaptive_palette, make_palette, validate_slowdown
 from audio_energy import AdaptiveAudioEnergy
@@ -604,6 +605,7 @@ def main(argv: list[str] | None = None) -> int:
     control_server: PaletteServer | None = None
     connection: SerialConnection | None = None
     refresh_requested = threading.Event()
+    board_controls = BoardResetControls()
     requested_video: Path | None = None
 
     def start_video(path: Path) -> None:
@@ -645,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
                 controls, args.controls_port, on_refresh=refresh_requested.set,
                 on_video_start=start_video,
                 video_library={str(path.relative_to(root)): path for path in clips},
+                board_controls=board_controls,
             )
             control_server.start()
             print(f"Live palette controls: {control_server.url}", file=sys.stderr)
@@ -662,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
             drop_late=False,
             rebase_late=True,
             display_size=args.display_size,
+            board_controls=board_controls,
         )
         return 0
     except RefreshRequested:

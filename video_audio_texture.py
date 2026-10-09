@@ -17,15 +17,31 @@ from video_controls import VideoPlaybackControls
 VIDEO_ENERGY_STOPS = np.array([
     # Quiet: violet and deep blue.
     [[44, 13, 91], [36, 15, 94], [20, 24, 87], [10, 28, 78], [27, 11, 77]],
-    # Middle: red moves across the circle into green.
-    [[165, 20, 47], [215, 40, 24], [187, 49, 27], [37, 164, 64], [16, 116, 51]],
-    # Energetic: orange through gold and yellow.
-    [[233, 82, 8], [246, 122, 9], [255, 169, 20], [255, 203, 39], [255, 228, 91]],
+    # Middle: red and coral flow into violet and blue at the outside.
+    [[165, 20, 47], [215, 40, 24], [187, 49, 27], [115, 32, 164], [38, 58, 140]],
+    # Energetic: warmer orange and amber, with less green in the gold accents.
+    [[233, 70, 8], [246, 101, 9], [255, 135, 20], [255, 166, 39], [255, 187, 75]],
 ], dtype=np.float32)
 
 # Keep the palette vivid on its own, but let video detail show through it.
 VIDEO_OVERLAY_OPACITY = 0.45
 HIGH_WAVE_COLOR = np.array([32, 156, 245], dtype=np.float32)
+ADAPTIVE_HIGH_WAVE_COLOR = np.array([64, 80, 245], dtype=np.float32)
+# Equalize the circular layer before its three visual regions are combined.
+CIRCULAR_AUDIO_BANDS = ((45, 250), (250, 1000), (1000, 2500), (2500, 16000))
+CIRCULAR_BAND_GAINS = np.array([0.55, 0.70, 1.65, 2.20], dtype=np.float32)
+BASS_RING_RADIUS = 0.66
+BASS_RING_WIDTH = 0.14
+OUTER_RING_SENSITIVITY = 1.5
+OUTER_COLOR_FADE_SECONDS = 1.5
+
+
+def _bass_ring_region(radial_position: np.ndarray) -> np.ndarray:
+    """Keep the bass ring inside the panel with a soft fade before its edge."""
+    fade = np.clip((radial_position - 0.78) / 0.16, 0.0, 1.0)
+    fade = 1.0 - fade * fade * (3.0 - 2.0 * fade)
+    return np.exp(-0.5 * ((radial_position - BASS_RING_RADIUS)
+                         / BASS_RING_WIDTH) ** 2) * fade
 
 
 @lru_cache(maxsize=4)
@@ -42,7 +58,7 @@ def _video_energy_stages(size: int) -> np.ndarray:
 
 def make_video_energy_palette(energy: float, *, size: int = 48,
                               reverse: bool = False) -> np.ndarray:
-    """Move smoothly from cool colors through red/green to orange/yellow."""
+    """Move smoothly from cool colors through coral/violet to orange/amber."""
     stages = _video_energy_stages(size)
     level = float(np.clip(energy, 0.0, 1.0))
     if level <= 0.5:
@@ -101,7 +117,7 @@ class LiveAudioVideoTexture:
         self.immediate = immediate
         # 21 ms of spectrum history instead of 43 ms; amplitude uses only
         # the newest 5 ms below, so transients do not wait for a full FFT.
-        self.energy = AdaptiveAudioEnergy(fft_size=1_024)
+        self.energy = AdaptiveAudioEnergy(fft_size=1_024, bands=CIRCULAR_AUDIO_BANDS)
         self.settings = default_settings() | {"preset": "adaptive", "brightness": 1.0}
         self.revision = -1
         self.phase = 0.0
@@ -127,6 +143,10 @@ class LiveAudioVideoTexture:
         self._color_high = np.minimum(self._color_low + 1, size - 1)
         self._color_mix = (self._color_positions - self._color_low)[:, None]
         self._color_radii = color_radii
+        self._outer_color_fields = np.zeros((len(color_radii), 5), dtype=np.float32)
+        self._outer_color_arrival = np.zeros(len(color_radii), dtype=np.float64)
+        outer_weight = np.clip((self.radius / self.max_radius - 0.30) / 0.30, 0.0, 1.0)
+        self._outer_color_weight = outer_weight**2 * (3.0 - 2.0 * outer_weight)
         # A small central core responds on this very frame. Quadratic travel
         # time makes the front slow down as it moves toward the corners.
         self.travel_position = np.clip(
@@ -140,16 +160,23 @@ class LiveAudioVideoTexture:
         self._travel_inverse = travel_inverse.reshape(size, size)
         self._angle_sin = np.sin(2.0 * self.angle)
         self._angle_cos = np.cos(2.0 * self.angle)
+        self._kaleidoscope_petals = np.cos(8.0 * self.angle)
+        self._kaleidoscope_facets = np.cos(16.0 * self.angle)
         self._wave_sample_positions = np.linspace(0, 1, 64)
         radial_position = self.radius / (size / 2.0)
+        # Darken the full adaptive circle, including its base color, before
+        # the nearest board edge. Physical radii keep the corners dark too.
+        edge_fade = np.clip((radial_position - 0.70) / 0.24, 0.0, 1.0)
+        self._adaptive_edge_gain = 1.0 - edge_fade**2 * (3.0 - 2.0 * edge_fade)
         self.band_regions = np.exp(-0.5 * (
-            (radial_position[..., None] - np.array([0.85, 0.52, 0.20]))
-            / np.array([0.26, 0.24, 0.14])
+            (radial_position[..., None] - np.array([BASS_RING_RADIUS, 0.52, 0.20]))
+            / np.array([BASS_RING_WIDTH, 0.24, 0.14])
         ) ** 2).astype(np.float32)
+        self.band_regions[..., 0] = _bass_ring_region(radial_position)
         self.top_wave_position = np.clip((self.angle + np.pi) / np.pi, 0.0, 1.0)
         self.top_wave_region = (
             np.maximum(-np.sin(self.angle), 0.0) ** 2
-            * np.exp(-0.5 * ((radial_position - 0.85) / 0.18) ** 2)
+            * self.band_regions[..., 0]
         ).astype(np.float32)
 
     def _top_wave_radius(self, samples: np.ndarray, strength: float) -> np.ndarray:
@@ -174,6 +201,21 @@ class LiveAudioVideoTexture:
                             waveform / peak)
         displacement = self.size * 0.025 * strength * self.top_wave_region * contour
         return self.radius - displacement
+
+    def _kaleidoscope_radius(self, radius: np.ndarray, local_energy: np.ndarray,
+                            local_pulse: np.ndarray) -> np.ndarray:
+        """Fold energetic outer rings into eight mirrored petals and finer facets."""
+        energy = np.clip((local_energy - 0.65) / 0.30, 0.0, 1.0)
+        pulse = np.clip((local_pulse - 0.35) / 0.50, 0.0, 1.0)
+        strength = (energy**2 * (3.0 - 2.0 * energy)
+                    * pulse**2 * (3.0 - 2.0 * pulse) * self._outer_color_weight)
+        petals = self._kaleidoscope_petals * np.sin(
+            self.radius * (2.0 * np.pi / (self.size * 0.38)) - self.wave_phase,
+        )
+        facets = self._kaleidoscope_facets * np.sin(
+            self.radius * (2.0 * np.pi / (self.size * 0.22)) + self.wave_phase,
+        )
+        return radius - self.size * 0.065 * strength * (0.75 * petals + 0.25 * facets)
 
     def _mapping_fields(self, targets: np.ndarray, elapsed: float,
                         dt: float) -> np.ndarray:
@@ -217,6 +259,18 @@ class LiveAudioVideoTexture:
                    if self.latest_samples is not None else np.empty(0))
         return self.render(frame, samples, elapsed, select_frame=select_frame)
 
+    def _outer_color_gain(self, fields: np.ndarray) -> np.ndarray:
+        """Fade arriving outer colors to zero brightness over 1.5 seconds."""
+        radial_fields = fields.reshape(-1, 5)[self._color_pixels]
+        changed = np.max(np.abs(radial_fields - self._outer_color_fields), axis=1) >= 0.20
+        self._outer_color_fields[changed] = radial_fields[changed]
+        self._outer_color_arrival[changed] = self.mapping_clock
+        age = self.mapping_clock - self._outer_color_arrival
+        fade = np.clip(age / OUTER_COLOR_FADE_SECONDS, 0.0, 1.0)
+        fade = fade**2 * (3.0 - 2.0 * fade)
+        radial_fade = np.interp(self.radius, self._color_radii, fade)
+        return 1.0 - self._outer_color_weight * radial_fade
+
     def render(self, frame: np.ndarray, samples: np.ndarray, elapsed: float, *,
                select_frame: Callable[[np.ndarray], np.ndarray] | None = None) -> np.ndarray:
         if frame.shape != (self.size, self.size, 3):
@@ -225,6 +279,8 @@ class LiveAudioVideoTexture:
         if not layers["audio_palette"] or self.latest_samples is None:
             self.mapping_envelope.fill(0.0)
             self.mapping_history.clear()
+            self._outer_color_fields.fill(0.0)
+            self._outer_color_arrival.fill(self.mapping_clock)
             layers["audio_palette"] = False
             self.video_controls.set_content_fps(self.video_controls.fps)
             if self.latest_samples is not None:
@@ -233,6 +289,8 @@ class LiveAudioVideoTexture:
             return compose_output_layers(frame, np.zeros_like(frame), layers)
         revision, settings = self.controls.settings_snapshot()
         if revision != self.revision:
+            self._outer_color_fields.fill(0.0)
+            self._outer_color_arrival.fill(self.mapping_clock)
             if settings["preset"] != self.settings["preset"]:
                 self.energy.reset()
                 self.visual_energy = 0.0
@@ -286,8 +344,14 @@ class LiveAudioVideoTexture:
                       pulse_target + max(0.0, self.pulse - pulse_target) * np.exp(-dt / 0.05))
         amplitudes = self.energy.band_amplitudes
         dominant = float(np.max(amplitudes))
-        band_targets = (pulse_target * (amplitudes / dominant) ** 1.5
-                        if dominant > 0 else np.zeros(3))
+        # Normalize against the unweighted spectrum so a dominant bass note
+        # cannot cancel its attenuation. Apply gains after the response curve
+        # so soft upper notes also receive a boost when played on their own.
+        response = (np.clip(
+            pulse_target * (amplitudes / dominant) ** 1.5 * CIRCULAR_BAND_GAINS,
+            0.0, 1.0,
+        ) if dominant > 0 else np.zeros(4))
+        band_targets = np.array([response[0], max(response[1:3]), response[3]])
         if self.immediate:
             self.band_levels[:] = band_targets
         else:
@@ -305,7 +369,9 @@ class LiveAudioVideoTexture:
         # The host holds decoded video frames during calm, bass-light music.
         # Audio texture and USB output still refresh at the normal panel rate.
         content_min_fps = min(10.0, self.video_controls.fps)
-        activity = min(1.0, 0.60 * energy + 0.40 * float(self.band_levels[0]))
+        # Visual equalization should not change the video's playback cadence.
+        bass_activity = float(self.band_levels[0] / CIRCULAR_BAND_GAINS[0])
+        activity = min(1.0, 0.60 * energy + 0.40 * bass_activity)
         desired_fps = (content_min_fps
                        + (self.video_controls.fps - content_min_fps) * activity)
         self.video_controls.set_content_fps(desired_fps)
@@ -322,7 +388,10 @@ class LiveAudioVideoTexture:
         # Keep the upper waveform responsive but shallow; the main color and
         # opacity change travels outward using the transported fields below.
         mapped_radius = self._top_wave_radius(samples, pulse_target if audible else 0.0)
-        spatial_frequency = 2.0 * np.pi / (self.size * 0.35)
+        # The same transported envelopes introduce and release the mirrored
+        # detail, so energetic passages unfold outward without a mode switch.
+        mapped_radius = self._kaleidoscope_radius(mapped_radius, local_energy, local_pulse)
+        spatial_frequency = 2.0 * np.pi / (self.size * 0.27)
         base = mapped_radius * spatial_frequency - self.wave_phase
         # A quieter returning wave meets the outgoing ring at the edge. Its
         # second harmonic adds a soft shimmer without making another hard band.
@@ -331,9 +400,10 @@ class LiveAudioVideoTexture:
                            * spatial_frequency - self.wave_phase)
         harmonic = np.sin(2.0 * base + 0.18 * self._angle_cos)
         wave = 0.70 * outgoing + 0.20 * returning + 0.10 * harmonic
-        outer_region = np.exp(-0.5 * ((mapped_radius / (self.size / 2.0) - 0.85)
-                                    / 0.26) ** 2)
-        bass = fields[..., 2] * outer_region
+        outer_region = _bass_ring_region(mapped_radius / (self.size / 2.0))
+        # Boost the outer ring's movement and glow after transport, keeping
+        # the spectrum equalization and video playback cadence independent.
+        bass = np.clip(fields[..., 2] * OUTER_RING_SENSITIVITY, 0.0, 1.0) * outer_region
         mids = fields[..., 3] * self.band_regions[..., 1]
         highs = fields[..., 4] * self.band_regions[..., 2]
         motion = np.maximum.reduce((1.40 * bass, 0.85 * mids, 1.20 * highs))
@@ -367,8 +437,10 @@ class LiveAudioVideoTexture:
         ), 0.0)
         high_tint = (0.85 * highs.ravel()[self._color_pixels]
                      * (0.55 + 0.45 * color_high_crest))[:, None]
+        high_color = (ADAPTIVE_HIGH_WAVE_COLOR if self.settings["preset"] == "adaptive"
+                      else HIGH_WAVE_COLOR)
         circular_palette = (circular_palette * (1.0 - high_tint)
-                            + HIGH_WAVE_COLOR * high_tint)
+                            + high_color * high_tint)
         # Blend colors at each radius before waveform deformation, so hue
         # changes ease in while the live contour still moves immediately.
         # Fractional RGB values prevent small changes from rounding away.
@@ -394,6 +466,8 @@ class LiveAudioVideoTexture:
         # saved audio brightness value is applied once to the palette layer.
         gain = self.settings["brightness"] ** (1.0 / 2.2) * (1.0 + 0.55 * local_energy)
         result = luma + (colored - luma) * saturation[..., None]
+        if self.settings["preset"] == "adaptive":
+            result *= (self._outer_color_gain(fields) * self._adaptive_edge_gain)[..., None]
         shine = crest * (0.22 * bass + 0.08 * mids) + 0.22 * highs * high_crest
         result = np.rint(result * (gain * (
             1.0 + 0.04 * motion * wave + shine

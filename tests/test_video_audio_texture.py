@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -18,8 +19,13 @@ class VideoAudioTextureTests(unittest.TestCase):
         self.assertGreater(float(quiet[:, 2].mean()), float(quiet[:, 0].mean()) * 2)
         self.assertLess(int(quiet.max()), 100)
         self.assertGreater(int(middle[0, 0]), int(middle[0, 1]) * 2)
-        self.assertGreater(int(middle[-1, 1]), int(middle[-1, 0]) * 2)
+        self.assertGreater(int(middle[-1, 2]), int(middle[-1, 1]) * 2)
+        for energy in np.linspace(0, 1, 41):
+            palette = make_video_energy_palette(energy).astype(float)
+            green = palette[:, 1] > np.maximum(palette[:, 0], palette[:, 2])
+            self.assertFalse(np.any(green))
         self.assertTrue(np.all(energetic[:, 0] > energetic[:, 2] * 2))
+        self.assertLess(float(energetic[:, 1].mean()), float(energetic[:, 0].mean()) * 0.55)
         self.assertGreater(float(energetic[:, 1].mean()), float(quiet[:, 1].mean()) * 4)
         self.assertGreater(float(energetic.mean()), float(middle.mean()))
         self.assertGreater(float(middle.mean()), float(quiet.mean()))
@@ -57,6 +63,97 @@ class VideoAudioTextureTests(unittest.TestCase):
         self.assertGreater(float(energetic.mean()), float(calm.mean()))
         self.assertGreater(int(energetic[0, 47].max()), int(energetic[0, 0].max()))
         self.assertFalse(np.array_equal(energetic, self.frame))
+
+    def test_outer_brightness_reaches_zero_in_1_5_seconds_during_sustained_music(self):
+        for fps in (30, 60):
+            for slowdown in (0, 95):
+                with self.subTest(fps=fps, slowdown=slowdown):
+                    controls = PaletteControls(size=48)
+                    controls.update(default_settings() | {
+                        "preset": "adaptive", "brightness": 1.0, "slowdown": slowdown,
+                    })
+                    texture = LiveAudioVideoTexture(controls, self.video, lambda n: np.zeros(n))
+                    phase = np.arange(1024) / 48_000
+                    bass = (0.2 * np.sin(2 * np.pi * 110 * phase)).astype(np.float32)
+                    texture.render(self.frame, np.zeros(1024), 0)
+                    # Leave time for the front to reach the corners at either speed.
+                    for _ in range(round(1.5 * fps)):
+                        texture.render(self.frame, bass, 1 / fps)
+                    corner = np.argmax(texture._color_radii)
+                    arrival = texture._outer_color_arrival[corner]
+                    fields = texture._mapping_fields(texture.mapping_envelope.copy(), 0, 0)
+                    saved_clock = texture.mapping_clock
+                    texture.mapping_clock = arrival
+                    self.assertAlmostEqual(texture._outer_color_gain(fields)[0, 0], 1.0)
+                    texture.mapping_clock = arrival + 0.75
+                    self.assertAlmostEqual(texture._outer_color_gain(fields)[0, 0], 0.5)
+                    texture.mapping_clock = arrival + 1.5
+                    gain = texture._outer_color_gain(fields)
+                    self.assertEqual(gain[0, 0], 0.0)
+                    self.assertEqual(gain[24, 24], 1.0)
+                    texture.mapping_clock = saved_clock
+                    # Continued sound does not renew the same color's hold.
+                    for _ in range(4 * fps):
+                        faded = texture.render(self.frame, bass, 1 / fps)
+                    np.testing.assert_array_equal(faded[0, 0], self.frame[0, 0])
+                    self.video.set_layers({"video": False})
+                    standalone = texture.render(self.frame, bass, 1 / fps)
+                    np.testing.assert_array_equal(standalone[0, 0], 0)
+                    self.assertGreater(standalone[24, 24].max(), 0)
+                    self.video.set_layers({"video": True})
+
+    def test_adaptive_circle_darkens_before_the_border_at_every_size_and_direction(self):
+        self.video.set_layers({"video": False})
+        phase = np.arange(1024) / 48_000
+        for size in (16, 32, 48):
+            for reverse in (False, True):
+                for frequency, amplitude in ((110, .002), (110, .2), (6000, .2)):
+                    with self.subTest(size=size, reverse=reverse, frequency=frequency,
+                                      amplitude=amplitude):
+                        controls = PaletteControls(size=size)
+                        controls.update(default_settings() | {
+                            "preset": "adaptive", "brightness": 1.0, "reverse": reverse,
+                        })
+                        texture = LiveAudioVideoTexture(
+                            controls, self.video, lambda count: np.zeros(count), size=size,
+                        )
+                        frame = np.zeros((size, size, 3), dtype=np.uint8)
+                        samples = (amplitude * np.sin(2 * np.pi * frequency * phase)).astype(np.float32)
+                        radius = texture.radius / (size / 2)
+                        for _ in range(30):
+                            result = texture.render(frame, samples, 1 / 60)
+                            self.assertFalse(np.any(result[radius >= .94]))
+                        brightness = result.max(axis=2)
+                        inner = brightness[(radius > .60) & (radius < .70)].mean()
+                        outer = brightness[(radius > .86) & (radius < .94)].mean()
+                        self.assertGreater(inner, outer * 2)
+                        self.assertGreater(result[size // 2, size // 2].max(), 0)
+
+    def test_adaptive_treble_accents_are_blue_violet_with_less_green(self):
+        self.video.set_layers({"video": False})
+        phase = np.arange(1024) / 48_000
+        highs = (0.2 * np.sin(2 * np.pi * 6000 * phase)).astype(np.float32)
+        for _ in range(180):
+            result = self.texture.render(self.frame, highs, 1 / 60)
+        radius = self.texture.radius / 24
+        treble_ring = result[(radius > .12) & (radius < .25)].mean(axis=0)
+        self.assertGreater(treble_ring[2], treble_ring[1] * 1.7)
+
+    def test_new_frequency_refreshes_faded_outer_colors_when_it_arrives(self):
+        phase = np.arange(1024) / 48_000
+        bass = (0.2 * np.sin(2 * np.pi * 110 * phase)).astype(np.float32)
+        highs = (0.2 * np.sin(2 * np.pi * 6000 * phase)).astype(np.float32)
+        for _ in range(150):
+            faded = self.texture.render(self.frame, bass, 1 / 30)
+        # The outer ring can refresh while the border remains spatially dark.
+        outer_pixel = (3, 24)
+        np.testing.assert_array_equal(faded[outer_pixel], self.frame[outer_pixel])
+        first = self.texture.render(self.frame, highs, 1 / 30)
+        np.testing.assert_array_equal(first[outer_pixel], self.frame[outer_pixel])
+        for _ in range(40):
+            refreshed = self.texture.render(self.frame, highs, 1 / 30)
+        self.assertGreater(refreshed[outer_pixel].max(), self.frame[outer_pixel].max())
+        np.testing.assert_array_equal(refreshed[0, 0], self.frame[0, 0])
 
     def test_turning_mapping_off_streams_original_frames_at_full_speed(self):
         encoder = VideoFrameEncoder(self.video.fps, 1, 48, None, self.texture)
@@ -154,6 +251,51 @@ class VideoAudioTextureTests(unittest.TestCase):
         old_sound[-256:] = 0
         np.testing.assert_array_equal(texture.render(self.frame, old_sound, 0), quiet)
 
+    def test_kaleidoscope_requires_high_energy_and_strong_pulses_and_preserves_symmetry(self):
+        texture = self.texture
+        full = np.ones((48, 48))
+        for energy, pulse in ((0, 0), (0.65, 1), (1, 0.35)):
+            np.testing.assert_array_equal(texture._kaleidoscope_radius(
+                texture.radius, full * energy, full * pulse,
+            ), texture.radius)
+        folded = texture._kaleidoscope_radius(texture.radius, full, full)
+        self.assertGreater(float(np.abs(folded - texture.radius).max()), 1)
+        np.testing.assert_allclose(folded, folded[::-1], atol=1e-5)
+        np.testing.assert_allclose(folded, folded[:, ::-1], atol=1e-5)
+        np.testing.assert_allclose(folded, folded.T, atol=1e-5)
+        center = texture._outer_color_weight == 0
+        np.testing.assert_array_equal(folded[center], texture.radius[center])
+        texture.wave_phase = 0.8
+        self.assertGreater(float(np.abs(texture._kaleidoscope_radius(
+            texture.radius, full, full,
+        ) - folded).max()), 0.5)
+
+    def test_energetic_kaleidoscope_changes_the_rendered_outer_palette(self):
+        self.controls.update(default_settings() | {
+            "preset": "sunset", "brightness": 1.0, "slowdown": 0,
+        })
+        self.video.set_layers({"video": False})
+        phase = np.arange(1024) / 48_000
+        music = (0.16 * np.sin(2 * np.pi * 110 * phase)
+                 + 0.08 * np.sin(2 * np.pi * 880 * phase)).astype(np.float32)
+        frames = []
+        for enabled in (False, True):
+            texture = LiveAudioVideoTexture(
+                self.controls, self.video, lambda n: np.zeros(n), size=48,
+            )
+            radius_mapping = texture._kaleidoscope_radius
+            if not enabled:
+                radius_mapping = lambda radius, energy, pulse: radius
+            with mock.patch.object(texture, "_kaleidoscope_radius", side_effect=radius_mapping):
+                for _ in range(30):
+                    result = texture.render(self.frame, music, 1 / 30)
+            frames.append(result)
+        center = self.texture._outer_color_weight == 0
+        np.testing.assert_array_equal(frames[0][center], frames[1][center])
+        outer = (self.texture.radius / 24 > 0.5) & (self.texture.radius / 24 < 0.85)
+        self.assertGreater(float(np.abs(frames[1][outer].astype(float)
+                                        - frames[0][outer]).mean()), 2)
+
     def test_first_note_changes_the_center_before_the_outer_overlay(self):
         flat = np.full_like(self.frame, 100)
         phase = np.arange(1024) / 48_000
@@ -166,10 +308,13 @@ class VideoAudioTextureTests(unittest.TestCase):
                                        - quiet[22:26, 22:26]).mean()), 3)
         self.assertGreater(int(attack[24, 24, 2]), int(attack[24, 24, 0]))
         np.testing.assert_array_equal(attack[40:], quiet[40:])
+        radius = self.texture.radius / 24
+        outer_ring = (radius > .65) & (radius < .80)
         changes = []
         for _ in range(27):
             expanded = self.texture.render(flat, bass, 1 / 30)
-            changes.append(float(np.abs(expanded[40:].astype(float) - quiet[40:]).mean()))
+            changes.append(float(np.abs(expanded[outer_ring].astype(float)
+                                        - quiet[outer_ring]).mean()))
         self.assertGreater(changes[-1], 10)
         self.assertGreater(changes[-1], changes[0] + 10)
 
@@ -323,7 +468,8 @@ class VideoAudioTextureTests(unittest.TestCase):
         self.assertGreater(self.texture.pulse, 0.9)
         self.assertGreater(self.video.state()["audio_reactive"]["energy"], 0.9)
         self.assertGreater(self.video.content_fps(), 28)
-        self.assertGreater(self.texture.band_levels[0], 0.9)
+        self.assertGreater(self.texture.band_levels[0], 0.45)
+        self.assertLess(self.texture.band_levels[0], 0.65)
         self.assertFalse(np.array_equal(loud, quiet))
         self.texture.render(self.frame, highs, 1 / 30)
         self.assertGreater(self.texture.band_levels[2], 0.9)
@@ -343,6 +489,47 @@ class VideoAudioTextureTests(unittest.TestCase):
         self.assertEqual(self.video.state()["audio_reactive"]["energy"], 0)
         np.testing.assert_array_equal(self.texture.band_levels, 0)
         self.assertEqual(self.video.content_fps(), 10)
+
+    def test_circular_equalization_reduces_lower_notes_and_boosts_soft_upper_notes(self):
+        phase = np.arange(1024) / 48_000
+        responses = []
+        for frequency, region in ((110, 0), (500, 1), (1600, 1), (6000, 2)):
+            with self.subTest(frequency=frequency):
+                texture = LiveAudioVideoTexture(
+                    self.controls, self.video, lambda count: np.zeros(count),
+                    size=48, immediate=True,
+                )
+                tone = (0.02 * np.sin(2 * np.pi * frequency * phase)).astype(np.float32)
+                texture.render(self.frame, tone, 0)
+                responses.append(float(texture.band_levels[region]))
+                if frequency < 1000:
+                    self.assertLess(texture.band_levels[region], texture.pulse * 0.8)
+                else:
+                    self.assertGreater(texture.band_levels[region], texture.pulse * 1.3)
+        self.assertGreater(responses[2], responses[1] * 2)
+        self.assertGreater(responses[3], responses[0] * 3)
+
+    def test_quiet_upper_notes_remain_visible_in_a_bass_dominated_mix(self):
+        phase = np.arange(1024) / 48_000
+        music = (0.14 * np.sin(2 * np.pi * 110 * phase)
+                 + 0.04 * np.sin(2 * np.pi * 1600 * phase)
+                 + 0.035 * np.sin(2 * np.pi * 6000 * phase)).astype(np.float32)
+        responses = []
+        for gains in (np.ones(4), None):
+            texture = LiveAudioVideoTexture(
+                self.controls, self.video, lambda count: np.zeros(count),
+                size=48, immediate=True,
+            )
+            if gains is None:
+                texture.render(self.frame, music, 0)
+            else:
+                with mock.patch("video_audio_texture.CIRCULAR_BAND_GAINS", gains):
+                    texture.render(self.frame, music, 0)
+            responses.append(texture.band_levels.copy())
+        neutral, equalized = responses
+        self.assertLess(equalized[0], neutral[0] * 0.7)
+        self.assertGreater(equalized[1], neutral[1] * 1.5)
+        self.assertGreater(equalized[2], neutral[2] * 2)
 
     def test_adaptive_colors_fade_on_attack_and_release_in_both_response_modes(self):
         silence = np.zeros(1024, dtype=np.float32)
@@ -371,7 +558,9 @@ class VideoAudioTextureTests(unittest.TestCase):
                     np.testing.assert_allclose(
                         texture.palette, make_video_energy_palette(target), atol=1,
                     )
-                np.testing.assert_allclose(result, quiet, atol=1)
+                center = texture._outer_color_weight == 0
+                np.testing.assert_allclose(result[center], quiet[center], atol=1)
+                np.testing.assert_array_equal(result[texture._outer_color_weight == 1], 0)
 
     def test_manual_color_edits_crossfade_through_intermediate_colors(self):
         self.video.set_layers({"video": False})
@@ -485,7 +674,7 @@ class VideoAudioTextureTests(unittest.TestCase):
             texture.wave_phase = 0.0
             result = texture.render(frame, bass, 0.0)
             radius = texture.radius / 24
-            outer = result[(radius > 0.72) & (radius < 1.02)].mean()
+            outer = result[(radius > 0.54) & (radius < 0.78)].mean()
             inner = result[radius < 0.30].mean()
             measurements.append((float(outer - inner), float(texture.band_levels[0])))
         self.assertGreater(measurements[1][0], measurements[0][0] + 5)
@@ -518,7 +707,7 @@ class VideoAudioTextureTests(unittest.TestCase):
             radius = texture.radius / 24
             inner_colors.append(result[radius < 0.30].mean(axis=0))
             outputs.append((
-                result[(radius > 0.72) & (radius < 1.02)].mean(),
+                result[(radius > 0.54) & (radius < 0.78)].mean(),
                 result[(radius > 0.38) & (radius < 0.66)].mean(),
                 result[radius < 0.30].mean(),
             ))
@@ -554,11 +743,11 @@ class VideoAudioTextureTests(unittest.TestCase):
         result = self.texture.render(frame, bass, 0.0)
         mapped = limit_video_flash(map_led_intensity(result, 2.2))
         radius = self.texture.radius / 24
-        outer = mapped[(radius > 0.72) & (radius < 1.02)].mean()
+        outer = mapped[(radius > 0.54) & (radius < 0.78)].mean()
         inner = mapped[radius < 0.30].mean()
         self.assertGreater(outer, inner)
         self.assertGreater(
-            mapped[(radius > 0.72) & (radius < 1.02)].max(),
+            mapped[(radius > 0.54) & (radius < 0.78)].max(),
             mapped[radius < 0.30].max(),
         )
 

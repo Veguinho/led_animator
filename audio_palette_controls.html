@@ -408,6 +408,10 @@
         </div>
         <div class="header-actions">
           <div id="status" class="status" role="status" aria-live="polite">Connecting…</div>
+          <button id="reset-boards" type="button" class="small" disabled
+            title="Restart the LED controller and resume playback with your current settings.">
+            ↻ Reset boards
+          </button>
           <button id="refresh" type="button" class="small" disabled
             title="Restart the visualizer and reload this page. Settings reset to defaults.">
             ↻ Refresh app
@@ -592,6 +596,10 @@
         pending = null,
         sending = false,
         refreshing = false,
+        resettingBoards = false,
+        boardResetSubmitting = false,
+        boardResetRevision = null,
+        boardResetError = null,
         refreshError = null,
         editVersion = 0,
         activeTab = null,
@@ -1165,6 +1173,30 @@
         renderSettings();
         queueUpdate();
       });
+      $("reset-boards").addEventListener("click", async () => {
+        if (resettingBoards || refreshing || videoStarting) return;
+        resettingBoards = true;
+        boardResetSubmitting = true;
+        boardResetError = null;
+        $("reset-boards").disabled = true;
+        $("reset-boards").textContent = "Resetting…";
+        status("Resetting LED boards…", "pending");
+        try {
+          const result = await request("/api/boards/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          boardResetRevision = result.board_reset.revision;
+        } catch (error) {
+          resettingBoards = false;
+          boardResetError = error.message;
+          $("reset-boards").textContent = "↻ Reset boards";
+          status(error.message, "error");
+        } finally {
+          boardResetSubmitting = false;
+        }
+      });
       $("refresh").addEventListener("click", async () => {
         if (refreshing) return;
         refreshing = true;
@@ -1172,6 +1204,7 @@
         pending = null;
         $("controls").disabled = true;
         $("refresh").disabled = true;
+        $("reset-boards").disabled = true;
         $("refresh").textContent = "Refreshing…";
         status("Restarting visualizer…", "pending");
         try {
@@ -1217,6 +1250,17 @@
           const videoMode = data.mode === "video";
           const reactiveVideo = videoMode && Boolean(data.video?.audio_reactive?.enabled);
           const mappedVideo = reactiveVideo && (data.video?.layers?.audio_palette ?? true);
+          const boardBusy = ["pending", "resetting"].includes(data.board_reset?.status);
+          const currentReset = data.board_reset?.revision === boardResetRevision;
+          if (!boardResetSubmitting && resettingBoards && currentReset && ["ready", "error"].includes(data.board_reset?.status)) {
+            resettingBoards = false;
+            boardResetError = null;
+          }
+          if (!boardResetSubmitting && (!resettingBoards || currentReset) && data.board_reset?.status === "error") {
+            boardResetError = data.board_reset.error || "Could not reset the LED boards.";
+          }
+          $("reset-boards").disabled = !data.board_reset_available || boardBusy || resettingBoards;
+          $("reset-boards").textContent = boardBusy || resettingBoards ? "Resetting…" : "↻ Reset boards";
           $("audio-tab").disabled = videoMode && !reactiveVideo;
           renderVideo(data.video, data.video_file_available, data.video_start_available, data.videos, data.video_starting);
           if (videoMode) {
@@ -1228,7 +1272,7 @@
             $("preview-description").textContent = "Saída final com as camadas habilitadas, enviada aos LEDs.";
             $("preview-note").textContent = "A prévia amplia os valores de brilho para mostrar os detalhes; os limites de segurança continuam ativos nos LEDs.";
             $("slowdown-help").textContent = "Controla a velocidade das ondas e suaviza as mudanças de cor. O brilho continua reagindo ao áudio em cada quadro.";
-            $("palette-adaptive").textContent = "Quiet music brings dark purple and blue. Medium energy shows red and green. Strong energy moves to orange and yellow. Colors blend gradually through a smooth gradient while each beat changes the glow. Slowdown makes the color transitions more gradual.";
+            $("palette-adaptive").textContent = "Quiet music brings dark purple and blue. Medium energy shows coral and violet. Strong energy moves to orange and amber, with blue-violet treble accents. The outer circle fades to black before the board’s edge. Colors blend gradually while each beat changes the glow. Slowdown makes the color transitions more gradual.";
           } else {
             $("app-eyebrow").textContent = "System audio / LED studio";
             $("app-title").textContent = "Live palette";
@@ -1258,7 +1302,9 @@
               else if (activeTab === "audio") draw(data);
               drawnFrameKey = previewFrameKey;
             }
-            if (refreshError) status(refreshError, "error");
+            if (boardBusy || resettingBoards) status("Resetting LED boards…", "pending");
+            else if (boardResetError) status(boardResetError, "error");
+            else if (refreshError) status(refreshError, "error");
             else status(videoMode
               ? data.video?.connected ? outputLayers.video
                 ? mappedVideo ? "● Vídeo + paleta circular nos LEDs" : "● Vídeo nos LEDs"
@@ -1270,6 +1316,7 @@
         } catch (error) {
           status("Disconnected · waiting for visualizer", "error");
           $("refresh").disabled = true;
+          $("reset-boards").disabled = true;
         }
         const interval = activeTab === "video" && !videoConnected ? 250
           : videoConnected ? 1000 / Math.min(60, dataFps) : 33;

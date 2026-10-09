@@ -53,14 +53,24 @@ position and palette settings. Pausing freezes the video while the audio layer
 and final output keep refreshing.
 Music moves a gentle outgoing wave, a softer reflection, and a faint harmonic
 through the circular palette. The **Slowdown** slider also slows this movement.
-Bass gives the outer ring more movement and glow; mids occupy the middle, and
+During high-energy passages, strong audio pulses gradually fold the outer circles
+into eight mirrored petals with finer facets. The pattern moves with the waves
+and eases back into circles as the music calms; quiet audio keeps the gentle rings.
+Bass gives the outer ring more movement and glow, with a 1.5× sensitivity boost;
+mids occupy the middle, and
 higher frequencies move the response toward the center. The video adaptive
-palette is dark purple and blue at low energy, red and green in the middle,
-and orange and yellow at high energy. Color, brightness, and transparency
+palette is dark purple and blue at low energy, coral and violet in the middle,
+and warmer orange and amber at high energy, with blue-violet treble accents.
+The adaptive circle darkens smoothly beyond 70% of the board's half-width
+and reaches black at 94%, leaving a dark margin before the border.
+Color, brightness, and transparency
 react at the center on the next transmitted frame, then spread outward with
 a soft front that decelerates toward the edges. The front reaches the corners
-in 0.7–1.4 seconds, depending on **Slowdown**. Falling energy releases with a
-0.42–0.60-second time constant, keeping strong bass and short gaps from
+in 0.7–1.4 seconds, depending on **Slowdown**.
+Each adaptive outer color fades smoothly to 0% brightness over 1.5 seconds
+after arriving, even during sustained music. A new energy or frequency change
+refreshes the color as it reaches each ring; the center stays responsive.
+Falling energy releases with a 0.42–0.60-second time constant, keeping strong bass and short gaps from
 flashing the whole overlay between cool and warm colors. The spectrum uses the latest 1,024
 samples (21.3 ms at 48 kHz); amplitude uses only the latest 256 (5.3 ms).
 **Slowdown** changes wave travel and release, without delaying the central attack.

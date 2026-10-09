@@ -43,7 +43,8 @@ class ImmediateVideoAudioTests(unittest.TestCase):
         self.assertGreater(self.texture.pulse, 0.9)
         self.assertGreater(self.video.state()["audio_reactive"]["energy"], 0.9)
         self.assertGreater(self.video.content_fps(), 28)
-        self.assertGreater(self.texture.band_levels[0], 0.9)
+        self.assertGreater(self.texture.band_levels[0], 0.45)
+        self.assertLess(self.texture.band_levels[0], 0.65)
         self.assertFalse(np.array_equal(loud, quiet))
 
         self.texture.render(self.frame, self.tone(6000), 1 / 30)
@@ -59,7 +60,10 @@ class ImmediateVideoAudioTests(unittest.TestCase):
         for _ in range(180):
             settled = self.texture.render(self.frame, np.zeros(1024), 1 / 30)
         # The independent color envelope can retain a sub-pixel RGB remainder.
-        np.testing.assert_allclose(settled, quiet, atol=1)
+        center = self.texture._outer_color_weight == 0
+        np.testing.assert_allclose(settled[center], quiet[center], atol=1)
+        outer = self.texture._outer_color_weight == 1
+        np.testing.assert_array_equal(settled[outer], self.frame[outer])
 
     def test_video_selection_and_texture_share_the_latest_audio(self):
         rates = []
