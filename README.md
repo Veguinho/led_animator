@@ -17,6 +17,9 @@ browser preview without connecting the LED board.
 The **Reset boards** button in the app header restarts the LED controller and
 resumes playback with the current palette and video position. It is available
 in live audio and video mode when the controller is connected.
+Use **Reset & reload** to reset the controller and reload the running software
+with the latest code. It reconnects the same browser tab and keeps the palette,
+video position, pause state, and output-layer switches.
 Viewed from the front, the panel layout is:
 
 ```text
@@ -48,6 +51,52 @@ of measured payload throughput); firmware flashing remains at 115200 baud.
 ```bash
 python main.py audio
 python main.py video video_clips/clip.mp4 --seconds 10
+python main.py youtube 'https://www.youtube.com/watch?v=pUWCnazcsbU'
+```
+
+You can also paste a YouTube link in the **Vídeo** tab while live audio or video
+is running. It downloads an H.264/AAC MP4 at **up to 360p** into `.build/youtube/`,
+then uses the same center crop and **48×48** player, preview, seeking, looping,
+and audio texture controls as local MP4s. Completed videos are reused from cache;
+the current playback continues during the download. This mode accepts recorded
+videos, including Shorts, rather than ongoing live broadcasts or playlists.
+
+The **Vídeo** tab also has a local video library, available while a video is
+playing. It scans MP4 files in the project folder, `video_clips/` (including
+subfolders), and `.build/youtube/`. Choose a file and click **Reproduzir seleção**
+to switch videos. New files appear automatically; **Atualizar lista** scans the
+folders immediately. The same library is available in the board-free preview.
+
+The **Slow → fast** tab applies music-driven playback to any video in the
+downloaded-video and local library list. Select a video and click
+**Play with Slow → fast** while the live audio or video app is running.
+Playback scales linearly from **0.8×** at 0% energy to **1.5×** at 100%
+energy (**1.15×** at 50%). Switching files in either video selector
+keeps Slow → fast enabled while the mode is active.
+It uses Adaptive passage-energy tracking to tint the video itself: calm music
+is dim blue and purple with softer saturation at **0.8×**; energetic music
+brings brighter, saturated orange and amber as playback accelerates.
+Near 100% energy, yellow and gold mix with bright pink and violet. Circular
+color waves follow the video's light and shadow while gently bending its texture;
+the bend eases in above 82% energy and recedes as the music calms.
+Maximum color intensity and **1.5×** speed require bass, mids and highs together;
+an isolated loud band produces a partial response. Silence returns to dim
+blue-purple at **0.8×**. The video's light and shadow remain visible, and black
+pixels stay black. Brightness and saturation sliders set their upper limits.
+The LED refresh rate stays steady while the video timeline follows the energy-driven speed.
+The tab shows current speed, energy, a live LED preview, pause, and restart;
+**Open video timeline** provides seeking. **Slowdown** in Audio palette adjusts
+the smoothing of tint, brightness, saturation and speed together. This mode requires live Mac audio and the LED
+board; the selected clip must be present in the local library. For a local
+clip, it is also available as `python stream_arduino.py VIDEO.mp4 --audio-motion --loop`.
+
+YouTube support requires the Python dependencies above and a JavaScript runtime
+such as Node.js or Deno. See [yt-dlp's runtime setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+For an existing live-stream firmware installation, use `--no-upload` with
+`main.py youtube`. To preview without the board:
+
+```bash
+python video_app.py --youtube 'https://www.youtube.com/watch?v=pUWCnazcsbU'
 ```
 
 ## See it in motion

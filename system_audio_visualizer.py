@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 from brightness_envelope import BrightnessEnvelope
 from board_controls import BoardResetControls
+from app_reload import save_reload_state, take_reload_state
 
 from audio_palette_controls import DEFAULT_SLOWDOWN, PaletteControls, PaletteServer, default_settings, make_adaptive_palette, make_palette, validate_slowdown
 from audio_energy import AdaptiveAudioEnergy
@@ -607,13 +608,28 @@ def main(argv: list[str] | None = None) -> int:
     refresh_requested = threading.Event()
     board_controls = BoardResetControls()
     requested_video: Path | None = None
+    requested_motion = False
+    reset_reload = False
+
+    def reload_after_reset() -> None:
+        nonlocal reset_reload
+        reset_reload = True
+        refresh_requested.set()
 
     def start_video(path: Path) -> None:
         nonlocal requested_video
         requested_video = path
         refresh_requested.set()
 
+    def start_motion(path: Path) -> None:
+        nonlocal requested_video, requested_motion
+        requested_video, requested_motion = path, True
+        refresh_requested.set()
+
     try:
+        reload_state = take_reload_state()
+        if controls is not None and reload_state.get("palette") is not None:
+            controls.update(reload_state["palette"])
         print(
             "Requesting access to the Mac's system audio. If prompted, allow "
             "System Audio Recording Only (screen access is not required)...",
@@ -640,14 +656,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         if controls is not None:
-            root = Path(__file__).resolve().parent
-            clips = sorted([*root.glob("*.mp4"), *(root / "video_clips").glob("*.mp4")],
-                           key=lambda path: (not path.name.endswith(".square.mp4"), path.name.casefold()))
             control_server = PaletteServer(
                 controls, args.controls_port, on_refresh=refresh_requested.set,
                 on_video_start=start_video,
-                video_library={str(path.relative_to(root)): path for path in clips},
+                on_motion_start=start_motion,
                 board_controls=board_controls,
+                on_reset=lambda: board_controls.request(on_complete=reload_after_reset),
             )
             control_server.start()
             print(f"Live palette controls: {control_server.url}", file=sys.stderr)
@@ -703,6 +717,9 @@ def main(argv: list[str] | None = None) -> int:
     assert control_server is not None
     args.controls_port = control_server.port
     args.no_browser = True
+    if reset_reload and controls is not None:
+        args.port = port
+        save_reload_state(controls.settings_snapshot()[1])
     if requested_video is not None:
         video_args = [
             sys.executable, str(Path(__file__).with_name("stream_arduino.py").resolve()),
@@ -713,6 +730,10 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.clear_on_exit:
             video_args.append("--clear-on-exit")
+        if requested_motion:
+            video_args.append("--audio-motion")
+            if controls is not None:
+                save_reload_state(controls.settings_snapshot()[1])
         try:
             os.execv(sys.executable, video_args)
         except OSError as exc:

@@ -179,7 +179,7 @@ class PaletteControls:
 
     def settings_snapshot(self) -> tuple[int, dict]:
         with self._lock:
-            return self._revision, copy.deepcopy(self._settings)
+            return self._revision, self._settings | {"colors": self._settings["colors"].copy()}
 
     def publish_frame(self, frame: np.ndarray, palette: np.ndarray | None = None) -> None:
         with self._lock:
@@ -192,10 +192,10 @@ class PaletteControls:
     def state(self, *, compact: bool = False) -> dict:
         with self._lock:
             result = {
-                "settings": copy.deepcopy(self._settings),
+                "settings": self._settings | {"colors": self._settings["colors"].copy()},
                 "revision": self._revision,
                 "palette": self._display_palette.tolist(),
-                "presets": copy.deepcopy(PRESETS),
+                "presets": {name: colors.copy() for name, colors in PRESETS.items()},
             }
             if compact:
                 # Encode once per acknowledged frame, even with several clients.
@@ -218,14 +218,40 @@ class PaletteServer:
         on_video_start: Callable[[Path], None] | None = None,
         video_library: dict[str, Path] | None = None,
         board_controls: BoardResetControls | None = None,
+        on_reset: Callable[[], dict] | None = None,
+        on_motion_start: Callable[[Path], None] | None = None,
     ) -> None:
         if video_path is not None and not video_path.is_file():
             raise ValueError(f"video does not exist: {video_path}")
         page = Path(__file__).with_name("audio_palette_controls.html").read_bytes()
         session = uuid.uuid4().hex
-        library = dict(video_library or {})
+        from video_library import LocalVideoLibrary
+        local_library = LocalVideoLibrary() if video_library is None else None
+
+        def library(*, refresh: bool = False) -> dict[str, Path]:
+            return local_library.videos(refresh=refresh) if local_library else dict(video_library)
         launch_lock = threading.Lock()
         launching = False
+        youtube = {"status": "idle", "message": "", "url": ""}
+        closing = threading.Event()
+
+        def prepare_youtube(url: str) -> None:
+            nonlocal launching, youtube
+            from youtube_video import download_youtube
+
+            def progress(message: str) -> None:
+                nonlocal youtube
+                youtube = {"status": "downloading", "message": message, "url": url}
+
+            try:
+                path = download_youtube(url, progress=progress)
+                if not closing.is_set():
+                    youtube = {"status": "starting", "message": "Iniciando vídeo…", "url": url}
+                    on_video_start(path)
+            except Exception as exc:
+                youtube = {"status": "error", "message": str(exc), "url": url}
+                with launch_lock:
+                    launching = False
 
         def state(*, compact: bool = False) -> dict:
             return controls.state(compact=compact) | {
@@ -234,9 +260,13 @@ class PaletteServer:
                 "video": video_controls.state() if video_controls is not None else None,
                 "video_file_available": video_path is not None,
                 "video_start_available": on_video_start is not None,
-                "videos": list(library),
+                "motion_start_available": on_motion_start is not None,
+                "videos": list(library()),
                 "video_starting": launching,
+                "youtube_available": on_video_start is not None,
+                "youtube": youtube.copy(),
                 "board_reset_available": board_controls is not None,
+                "system_reset_available": on_reset is not None,
                 "board_reset": board_controls.state() if board_controls is not None else None,
             }
 
@@ -310,6 +340,8 @@ class PaletteServer:
                     self.json_response(200, state())
                 elif self.path == "/api/state?compact=1":
                     self.json_response(200, state(compact=True))
+                elif self.path == "/api/video/library":
+                    self.json_response(200, {"videos": list(library(refresh=True))})
                 elif self.path == "/api/video/file":
                     self.serve_video()
                 else:
@@ -325,13 +357,15 @@ class PaletteServer:
 
             def do_POST(self) -> None:
                 nonlocal launching
-                if self.path not in ("/api/palette", "/api/refresh", "/api/boards/reset", "/api/video/seek", "/api/video/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
+                if self.path not in ("/api/palette", "/api/refresh", "/api/reset", "/api/boards/reset", "/api/video/seek", "/api/video/start", "/api/video/motion/start", "/api/youtube/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
-                allowed_host = f"127.0.0.1:{self.server.server_port}"
-                if (self.headers.get("Host") != allowed_host
-                    or self.headers.get("Origin", f"http://{allowed_host}") != f"http://{allowed_host}"):
+                host = self.headers.get("Host")
+                allowed_hosts = {f"127.0.0.1:{self.server.server_port}",
+                                 f"localhost:{self.server.server_port}"}
+                if (host not in allowed_hosts
+                    or self.headers.get("Origin", f"http://{host}") != f"http://{host}"):
                     self.json_response(403, {"error": "use the local control panel URL"})
                     return
                 try:
@@ -341,17 +375,37 @@ class PaletteServer:
                     if not 0 < length <= 4096:
                         raise ValueError("invalid request size")
                     payload = json.loads(self.rfile.read(length))
-                    if self.path in ("/api/refresh", "/api/boards/reset"):
+                    if self.path in ("/api/refresh", "/api/reset", "/api/boards/reset"):
                         if payload != {}:
                             raise ValueError("this action expects an empty JSON object")
+                    elif self.path == "/api/video/motion/start":
+                        if on_motion_start is None:
+                            self.json_response(503, {"error": "live audio motion is unavailable in this player"})
+                            return
+                        available_videos = library(refresh=True)
+                        if (not isinstance(payload, dict) or payload.keys() != {"video"}
+                            or not isinstance(payload["video"], str) or payload["video"] not in available_videos):
+                            raise ValueError("Choose a video from the library.")
+                        selected_video = available_videos[payload["video"]]
+                        if not selected_video.is_file():
+                            raise ValueError("The selected video is no longer available.")
+                    elif self.path == "/api/youtube/start":
+                        if on_video_start is None:
+                            self.json_response(503, {"error": "YouTube launch is unavailable"})
+                            return
+                        if not isinstance(payload, dict) or payload.keys() != {"url"}:
+                            raise ValueError("YouTube expects a URL")
+                        from youtube_video import youtube_url
+                        selected_url = youtube_url(payload["url"])
                     elif self.path == "/api/video/start":
                         if on_video_start is None:
                             self.json_response(503, {"error": "video launch is unavailable"})
                             return
+                        available_videos = library(refresh=True)
                         if (not isinstance(payload, dict) or payload.keys() != {"video"}
-                            or not isinstance(payload["video"], str) or payload["video"] not in library):
+                            or not isinstance(payload["video"], str) or payload["video"] not in available_videos):
                             raise ValueError("Escolha um vídeo da lista.")
-                        selected_video = library[payload["video"]]
+                        selected_video = available_videos[payload["video"]]
                         if not selected_video.is_file():
                             raise ValueError("O arquivo de vídeo não está mais disponível.")
                     elif self.path in ("/api/video/seek", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
@@ -380,21 +434,43 @@ class PaletteServer:
                 except OSError:
                     self.json_response(500, {"error": "could not save palette settings"})
                     return
+                if self.path == "/api/reset":
+                    if on_reset is None:
+                        self.json_response(503, {"error": "system reset is unavailable in this preview"})
+                        return
+                    with launch_lock:
+                        if launching:
+                            self.json_response(409, {"error": "wait for the video to finish starting"})
+                            return
+                        reset_state = on_reset()
+                    self.json_response(202, {"restarting": True, "session": session,
+                                             "board_reset": reset_state})
+                    return
                 if self.path == "/api/boards/reset":
                     if board_controls is None:
                         self.json_response(503, {"error": "no LED board is connected"})
                         return
                     self.json_response(202, {"board_reset": board_controls.request()})
                     return
-                if self.path == "/api/video/start":
+                if self.path in ("/api/video/start", "/api/video/motion/start", "/api/youtube/start"):
                     with launch_lock:
+                        if (board_controls is not None
+                            and board_controls.state()["status"] in ("pending", "resetting")):
+                            self.json_response(409, {"error": "wait for the LED reset to finish"})
+                            return
                         if launching:
                             self.json_response(409, {"error": "O vídeo já está iniciando."})
                             return
                         launching = True
                     self.json_response(202, {"starting": True, "session": session})
                     self.wfile.flush()
-                    on_video_start(selected_video)
+                    if self.path == "/api/youtube/start":
+                        threading.Thread(target=prepare_youtube, args=(selected_url,),
+                                         name="youtube-download", daemon=True).start()
+                    elif self.path == "/api/video/motion/start":
+                        on_motion_start(selected_video)
+                    else:
+                        on_video_start(selected_video)
                     return
                 if self.path == "/api/refresh":
                     if on_refresh is None:
@@ -414,6 +490,7 @@ class PaletteServer:
                 self.connection.settimeout(2)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self._closing = closing
         self.port = self._server.server_port
         self.url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(
@@ -424,6 +501,7 @@ class PaletteServer:
         self._thread.start()
 
     def close(self) -> None:
+        self._closing.set()
         if self._thread.is_alive():
             self._server.shutdown()
             self._thread.join(timeout=2)

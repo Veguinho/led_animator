@@ -11,12 +11,12 @@ from scripts.research_video_cpu import search
 
 
 class CpuSearchTests(unittest.TestCase):
-    def run_search(self, values):
+    def run_search(self, values, *, iterations=None):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory)/"trials.jsonl"
             args = SimpleNamespace(video=Path("clip.mp4"), output=destination,
                                    poll_fps=30, compact=True, seconds=6, warmup=2,
-                                   start=0, modules=None, patience=50)
+                                   start=0, modules=None, patience=50, iterations=iterations)
             def measurement(*_args, **_kwargs):
                 cpu, valid = next(values)
                 return SimpleNamespace(returncode=0, stdout=json.dumps({
@@ -28,6 +28,15 @@ class CpuSearchTests(unittest.TestCase):
             rows = [json.loads(line) for line in destination.read_text().splitlines()]
             summary = json.loads(destination.with_suffix(".summary.json").read_text())
             return rows, summary
+
+    def test_fixed_limit_stops_at_50_candidates_despite_continued_gains(self):
+        values = iter((20 * 0.98**iteration, True)
+                      for iteration in range(51) for _ in range(3))
+        rows, summary = self.run_search(values, iterations=50)
+        self.assertEqual(len(rows), 51)  # Baseline plus 50 candidates.
+        self.assertEqual(rows[-1]["iteration"], 50)
+        self.assertEqual(summary["stop_reason"], "iteration_limit")
+        self.assertEqual(summary["stale_iterations"], 0)
 
     def test_stops_after_exactly_50_attempts_without_a_gain_over_one_percent(self):
         values = iter([(20, True)]*3 + [(19.8, True)]*50)

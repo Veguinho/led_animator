@@ -14,6 +14,36 @@ import led_animator
 
 
 class VideoLaunchTests(unittest.TestCase):
+    def test_localhost_browser_can_start_a_video_and_other_origins_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clip = Path(directory) / "clip.mp4"
+            clip.touch()
+            started = threading.Event()
+            callback = mock.Mock(side_effect=lambda path: started.set())
+            server = PaletteServer(PaletteControls(), port=0, on_video_start=callback,
+                                   video_library={"clip.mp4": clip})
+            server.start()
+            try:
+                base = server.url.replace("127.0.0.1", "localhost")
+                def post(origin, **headers):
+                    return urlopen(Request(base + "/api/video/start", method="POST",
+                        data=json.dumps({"video": "clip.mp4"}).encode(),
+                        headers={"Content-Type": "application/json", "Origin": origin, **headers}), timeout=2)
+
+                for origin, headers in [("https://example.com", {}), (server.url, {}),
+                                        ("http://example.com", {"Host": "example.com"})]:
+                    with self.subTest(origin=origin, headers=headers), self.assertRaises(HTTPError) as error:
+                        post(origin, **headers)
+                    self.assertEqual(error.exception.code, 403)
+                    error.exception.close()
+                callback.assert_not_called()
+                with post(base) as response:
+                    self.assertEqual(response.status, 202)
+                self.assertTrue(started.wait(1))
+                callback.assert_called_once_with(clip)
+            finally:
+                server.close()
+
     def test_media_tools_are_resolved_with_the_macos_service_path(self):
         for tool in ("ffprobe", "ffmpeg"):
             with (

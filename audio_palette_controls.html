@@ -413,14 +413,15 @@
             ↻ Reset boards
           </button>
           <button id="refresh" type="button" class="small" disabled
-            title="Restart the visualizer and reload this page. Settings reset to defaults.">
-            ↻ Refresh app
+            title="Reset the LED controller, reload the running software and reconnect this page. Keep current settings and playback position.">
+            ↻ Reset &amp; reload
           </button>
         </div>
       </header>
       <nav class="tabs" role="tablist" aria-label="LED controls">
         <button id="audio-tab" type="button" role="tab" aria-controls="audio-panel" aria-selected="true">Audio palette</button>
         <button id="video-tab" type="button" role="tab" aria-controls="video-panel" aria-selected="false">Vídeo</button>
+        <button id="motion-tab" type="button" role="tab" aria-controls="motion-panel" aria-selected="false">Slow → fast</button>
       </nav>
       <section id="audio-panel" role="tabpanel" aria-labelledby="audio-tab">
       <div class="layout">
@@ -531,12 +532,23 @@
           <h2 id="video-name">Player de vídeo</h2>
           <p id="video-help">Inicie um vídeo para escolher de onde ele será reproduzido.</p>
           <div id="video-launch">
-            <label for="video-file">Vídeo</label>
+            <label for="video-file">Biblioteca de vídeos locais</label>
             <div class="seek-row">
               <select id="video-file" aria-label="Vídeo para reproduzir"></select>
               <button id="video-play" type="button" disabled>▶ Iniciar vídeo</button>
+              <button id="video-library-refresh" type="button">↻ Atualizar lista</button>
             </div>
+            <p id="video-library-status" class="note" role="status">Procurando vídeos locais…</p>
+            <p class="note">Lê os MP4s da pasta do projeto, de <strong>video_clips/</strong> e dos downloads do YouTube. Novos arquivos aparecem automaticamente.</p>
           </div>
+          <form id="youtube-launch" hidden>
+            <label for="youtube-url">YouTube</label>
+            <div class="seek-row">
+              <input id="youtube-url" type="url" required placeholder="https://www.youtube.com/watch?v=…" aria-label="Link do vídeo do YouTube" />
+              <button id="youtube-play" type="submit">▶ Iniciar YouTube</button>
+            </div>
+            <p id="youtube-status" class="note" role="status">Baixa em até 360p e reproduz em 48 × 48, com os mesmos controles do MP4.</p>
+          </form>
           <p id="video-audio-status" class="note" role="status">Aguardando áudio do Mac.</p>
           <fieldset id="output-layers" disabled>
             <h3>Camadas da saída final</h3>
@@ -545,6 +557,7 @@
               <label class="check" for="layer-audio-palette"><input id="layer-audio-palette" type="checkbox" checked />Audio palette circular</label>
             </div>
             <p id="output-layers-status">As duas camadas são combinadas na saída final.</p>
+            <p class="note">Uma corda circular pulsa com a melodia sobre a paleta suave e transparente.</p>
           </fieldset>
           <div id="video-led-preview-wrap" hidden>
             <h3>Saída final · prévia ao vivo dos LEDs</h3>
@@ -575,10 +588,46 @@
           <p id="video-message" class="note" role="status" aria-live="polite"></p>
         </div>
       </section>
+      <section id="motion-panel" role="tabpanel" aria-labelledby="motion-tab" hidden>
+        <div class="card video-card">
+          <div class="eyebrow">Music-driven playback</div>
+          <h2>Slow → fast video</h2>
+          <p>Choose any video from your library. At 0% energy, playback is 0.8× with a dim blue and purple tint. As the song fills with bass, mids and highs, the video becomes brighter, warmer and more saturated, accelerating linearly to 1.5× at 100% energy. Near maximum energy, yellow, gold, pink and violet flow in circular waves that follow and gently bend the video's texture.</p>
+          <label for="motion-file">Downloaded videos &amp; local library</label>
+          <div class="seek-row">
+            <select id="motion-file" aria-label="Video for slow-to-fast playback"></select>
+            <button id="motion-library-refresh" type="button">↻ Refresh list</button>
+          </div>
+          <div class="row">
+            <button id="motion-play" type="button" disabled>▶ Play with Slow → fast</button>
+            <button id="motion-pause" type="button" hidden>⏸ Pause</button>
+            <button id="motion-restart" type="button" hidden>Restart video</button>
+          </div>
+          <p id="motion-status" class="note" role="status">Looking for downloaded videos…</p>
+          <div id="motion-live" hidden>
+            <label class="range-label" for="motion-energy">Calm blue → warm &amp; excited <output id="motion-energy-value">0%</output></label>
+            <meter id="motion-energy" min="0" max="1" value="0" style="width:100%;height:16px">0%</meter>
+            <p><strong id="motion-speed">1.00×</strong> playback · <span id="motion-fps">Original FPS</span></p>
+            <p class="note">Adaptive video tint · saturation <span id="motion-saturation">55%</span></p>
+            <canvas id="motion-preview" class="video-led-preview" width="384" height="384"
+              role="img" aria-label="Live video sent to the LEDs"></canvas>
+            <p class="note">Maximum warmth, brightness and speed need energetic bass, mids and highs together. Silence returns to dim blue-purple at 0.8×. The clip repeats at the end.</p>
+            <button id="motion-timeline" type="button">Open video timeline</button>
+          </div>
+        </div>
+      </section>
     </main>
     <script>
       "use strict";
-      const $ = (id) => document.getElementById(id);
+      const elements = new Map();
+      const $ = (id) => {
+        if (!elements.has(id)) elements.set(id, document.getElementById(id));
+        return elements.get(id);
+      };
+      function setText(id, value) {
+        const element = $(id);
+        if (element.textContent !== String(value)) element.textContent = value;
+      }
       const names = {
         rainbow: "Rainbow",
         "moving-rainbow": "Moving rainbow",
@@ -590,6 +639,10 @@
         fire: "Fire",
         custom: "Custom palette",
       };
+      function setFlag(id, property, value) {
+        const element = $(id), flag = Boolean(value);
+        if (element[property] !== flag) element[property] = flag;
+      }
       let settings,
         presets,
         revision = -1,
@@ -610,6 +663,8 @@
         layersChanging = false,
         outputLayers = { video: true, audio_palette: true },
         videoStarting = false,
+        videoLaunchMessage = null,
+        motionLaunchError = null,
         videoConnected = false,
         previewAvailable = false,
         previewStart = 0,
@@ -620,18 +675,17 @@
       const videoLedContext = videoLedCanvas.getContext("2d");
       const videoPixelCanvas = document.createElement("canvas");
       const videoPixelContext = videoPixelCanvas.getContext("2d");
-      let previewFrame = null, previewFrameKey = null, drawnFrameKey = null;
+      let previewFrame = null, previewFrameKey = null, drawnFrameKey = null, renderedMode = null;
       function decodePreview(data) {
         if (!data.frame_rgb) return data;
         const key = `${data.session}:${data.frame_revision}:${data.frame_size}`;
         if (key !== previewFrameKey) {
           const rgb = atob(data.frame_rgb);
           const size = data.frame_size;
-          previewFrame = Array.from({ length: size }, (_, y) =>
-            Array.from({ length: size }, (_, x) => {
-              const index = (y * size + x) * 3;
-              return [rgb.charCodeAt(index), rgb.charCodeAt(index + 1), rgb.charCodeAt(index + 2)];
-            }));
+          if (!previewFrame || previewFrame.size !== size)
+            previewFrame = { size, rgb: new Uint8Array(size * size * 3) };
+          for (let index = 0; index < rgb.length; index++)
+            previewFrame.rgb[index] = rgb.charCodeAt(index);
           previewFrameKey = key;
         }
         data.frame = previewFrame;
@@ -641,7 +695,7 @@
         activeTab = name;
         drawnFrameKey = null;
         if (name !== "video" && videoConnected) videoPreview.pause();
-        for (const tab of ["audio", "video"]) {
+        for (const tab of ["audio", "video", "motion"]) {
           const selected = tab === name;
           $(tab + "-tab").setAttribute("aria-selected", String(selected));
           $(tab + "-panel").hidden = !selected;
@@ -650,6 +704,106 @@
       }
       $("audio-tab").addEventListener("click", () => setTab("audio"));
       $("video-tab").addEventListener("click", () => setTab("video"));
+      $("motion-tab").addEventListener("click", () => setTab("motion"));
+      $("motion-timeline").addEventListener("click", () => setTab("video"));
+      $("motion-pause").addEventListener("click", () => $("video-pause").click());
+      $("motion-restart").addEventListener("click", () => seekVideo(0));
+
+      function renderMotion(data) {
+        const running = Boolean(data.video?.audio_motion);
+        const busy = videoStarting || data.video_starting || refreshing;
+        const videos = data.videos || [];
+        const select = $("motion-file");
+        if (JSON.stringify([...select.options].map(option => option.value)) !== JSON.stringify(videos)) {
+          const selected = select.value;
+          select.replaceChildren(...videos.map(name => {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name.startsWith(".build/youtube/")
+              ? "YouTube / " + name.slice(".build/youtube/".length) : name;
+            return option;
+          }));
+          const currentFile = videos.find(name => name.split("/").pop() === data.video?.name);
+          if (videos.includes(selected)) select.value = selected;
+          else if (currentFile) select.value = currentFile;
+          else if (videos.includes($("video-file").value)) select.value = $("video-file").value;
+        }
+        const currentSelected = running && select.value.split("/").pop() === data.video?.name;
+        select.disabled = busy || !data.motion_start_available;
+        setFlag("motion-library-refresh", "disabled", busy);
+        setFlag("motion-play", "disabled", busy || !data.motion_start_available || !select.value || currentSelected);
+        setText("motion-play", busy ? "Starting…" : currentSelected ? "● Slow → fast active" : "▶ Play with Slow → fast");
+        setFlag("motion-live", "hidden", !running);
+        setFlag("motion-pause", "hidden", !running);
+        setFlag("motion-restart", "hidden", !running);
+        setFlag("motion-pause", "disabled", videoPausing || videoSeeking || busy);
+        setFlag("motion-restart", "disabled", videoPausing || videoSeeking || busy);
+        setText("motion-pause", data.video?.paused ? "▶ Resume" : "⏸ Pause");
+        let motionMessage = motionLaunchError || (busy ? "Starting video and connecting to the panel…"
+          : running ? data.video.paused ? "Video paused · music energy still updates."
+            : data.video.audio_reactive?.audible ? "Tint, saturation, brightness and speed follow the music on your Mac."
+              : "Calm / silent · dim blue-purple at 0.8×."
+          : !data.motion_start_available ? "Open the live audio app with the LED board to use this mode."
+          : !videos.length ? "No videos found. Download a video in the Vídeo tab or add an MP4 to the library."
+          : "Choose a video · dim blue-purple at 0.8× → bright warm colors up to 1.5×.");
+        if (running && !motionLaunchError && !busy) {
+          motionMessage = `${data.video.name} · ${motionMessage}`;
+        }
+        setText("motion-status", motionMessage);
+        if (running) {
+          const energy = data.video.audio_reactive?.energy || 0;
+          $("motion-energy").value = energy;
+          setText("motion-energy-value", `${Math.round(energy * 100)}%`);
+          setText("motion-speed", `${(data.video.playback_speed || 1).toFixed(2)}×`);
+          setText("motion-saturation", `${Math.round((data.video.audio_reactive?.saturation ?? 0.55) * 100)}%`);
+          setText("motion-fps", `${data.video.fps.toFixed(2)} FPS to LEDs`);
+        }
+      }
+      $("motion-file").addEventListener("change", () => {
+        motionLaunchError = null;
+        $("video-file").value = $("motion-file").value;
+        setFlag("motion-play", "disabled", false);
+        setText("motion-play", "▶ Play with Slow → fast");
+      });
+      $("motion-library-refresh").addEventListener("click", () => $("video-library-refresh").click());
+      $("motion-play").addEventListener("click", async () => {
+        if (videoStarting || refreshing) return;
+        const selectedVideo = $("motion-file").value;
+        if (!selectedVideo) return;
+        const selectedName = selectedVideo.split("/").pop();
+        videoStarting = true;
+        motionLaunchError = null;
+        setFlag("motion-play", "disabled", true);
+        setFlag("motion-file", "disabled", true);
+        setText("motion-status", `Starting ${selectedName}…`);
+        try {
+          const previous = await request("/api/video/motion/start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({video: selectedVideo}),
+          });
+          const deadline = Date.now() + 45000;
+          while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            let current;
+            try { current = await request("/api/state"); } catch { continue; }
+            if (current.session && current.session !== previous.session) {
+              if (!current.video?.audio_motion || current.video.name !== selectedName)
+                throw new Error("Could not start Slow → fast with the selected video. Try again.");
+              setTab("motion");
+              window.location.reload();
+              return;
+            }
+          }
+          throw new Error("Could not start Slow → fast. Check the panel’s USB connection.");
+        } catch (error) {
+          videoStarting = false;
+          refreshError = error.message;
+          motionLaunchError = error.message;
+          setText("motion-status", error.message);
+          setFlag("motion-play", "disabled", false);
+          setFlag("motion-file", "disabled", false);
+        }
+      });
       function formatTime(seconds) {
         const total = Math.max(0, Math.floor(seconds));
         const hours = Math.floor(total / 3600);
@@ -675,7 +829,7 @@
       }
       function renderVideoPauseButton() {
         const paused = videoConnected ? videoPaused : videoPreview.paused;
-        $("video-pause").textContent = paused ? "▶ Continuar vídeo" : "⏸ Pausar vídeo";
+        setText("video-pause", paused ? "▶ Continuar vídeo" : "⏸ Pausar vídeo");
         $("video-pause").setAttribute("aria-label", paused ? "Continuar vídeo" : "Pausar vídeo");
       }
       videoPreview.addEventListener("play", renderVideoPauseButton);
@@ -698,23 +852,36 @@
       videoPreview.addEventListener("timeupdate", () => {
         if (!videoConnected && !videoEditing) {
           $("video-progress").value = videoPreview.currentTime;
-          $("video-current").textContent = formatTime(videoPreview.currentTime);
+          setText("video-current", formatTime(videoPreview.currentTime));
         }
       });
-      function renderVideo(video, fileAvailable = false, startAvailable = false, videos = [], starting = false) {
+      function renderVideo(video, fileAvailable = false, startAvailable = false, videos = null, starting = false) {
         videoConnected = Boolean(video?.connected);
-        $("video-launch").hidden = Boolean(video);
-        if (JSON.stringify([...$("video-file").options].map(option => option.value)) !== JSON.stringify(videos)) {
-          $("video-file").replaceChildren(...videos.map(name => {
-            const option = document.createElement("option");
-            option.value = name;
-            option.textContent = name;
-            return option;
-          }));
+        if (videos !== null) {
+          setFlag("video-launch", "hidden", !startAvailable && !videos.length);
+          if (JSON.stringify([...$("video-file").options].map(option => option.value)) !== JSON.stringify(videos)) {
+            const selected = $("video-file").value;
+            $("video-file").replaceChildren(...videos.map(name => {
+              const option = document.createElement("option");
+              option.value = name;
+              option.textContent = name.startsWith(".build/youtube/")
+                ? "YouTube / " + name.slice(".build/youtube/".length) : name;
+              return option;
+            }));
+            if (videos.includes(selected)) $("video-file").value = selected;
+            else if (video) {
+              const currentFile = videos.find(name => name.split("/").pop() === video.name);
+              if (currentFile) $("video-file").value = currentFile;
+            }
+          }
+          setText("video-library-status", videoLaunchMessage || (videos.length
+            ? `${videos.length} ${videos.length === 1 ? "vídeo disponível" : "vídeos disponíveis"}. Escolha um arquivo para ${video ? "trocar o vídeo" : "iniciar"}.`
+            : "Nenhum MP4 encontrado. Adicione vídeos em video_clips/ ou baixe um link do YouTube abaixo."));
+          setFlag("video-library-refresh", "disabled", starting || videoStarting);
+          setFlag("video-file", "disabled", !startAvailable || starting || videoStarting);
+          setFlag("video-play", "disabled", !startAvailable || !videos.length || starting || videoStarting);
+          setText("video-play", starting || videoStarting ? "Iniciando…" : video ? "▶ Reproduzir seleção" : "▶ Iniciar vídeo");
         }
-        $("video-file").disabled = !startAvailable || starting || videoStarting;
-        $("video-play").disabled = !startAvailable || !videos.length || starting || videoStarting;
-        $("video-play").textContent = starting || videoStarting ? "Iniciando…" : "▶ Iniciar vídeo";
         if (fileAvailable && !previewAvailable) {
           previewAvailable = true;
           previewStart = video?.position || 0;
@@ -725,71 +892,78 @@
           videoPreview.removeAttribute("src");
           videoPreview.load();
         }
-        $("video-preview-wrap").hidden = !fileAvailable;
-        $("video-led-preview-wrap").hidden = !videoConnected;
-        $("video-controls").disabled = !video || videoSeeking || videoPausing;
-        $("video-pause").disabled = !videoConnected && !fileAvailable;
-        $("output-layers").disabled = !videoConnected || layersChanging;
+        setFlag("video-preview-wrap", "hidden", !fileAvailable);
+        setFlag("video-led-preview-wrap", "hidden", !videoConnected);
+        setFlag("video-controls", "disabled", !video || videoSeeking || videoPausing);
+        setFlag("video-pause", "disabled", !videoConnected && !fileAvailable);
+        setFlag("output-layers", "disabled", !videoConnected || layersChanging);
         if (!layersChanging) {
           outputLayers = video?.layers ?? { video: true, audio_palette: true };
-          $("layer-video").checked = outputLayers.video;
-          $("layer-audio-palette").checked = outputLayers.audio_palette;
+          setFlag("layer-video", "checked", outputLayers.video);
+          setFlag("layer-audio-palette", "checked", outputLayers.audio_palette);
         }
-        $("layer-audio-palette").disabled = !video?.audio_reactive?.enabled;
-        $("output-layers-status").textContent = outputLayers.video
+        setFlag("layer-audio-palette", "disabled", !video?.audio_reactive?.enabled || Boolean(video?.audio_motion));
+        setText("output-layers-status", outputLayers.video
           ? outputLayers.audio_palette && video?.audio_reactive?.enabled
             ? "Vídeo + audio palette circular na saída final."
             : "Somente a camada de vídeo na saída final."
           : outputLayers.audio_palette && video?.audio_reactive?.enabled
             ? "Somente a audio palette circular na saída final."
-            : "Todas as camadas desligadas · saída preta.";
+            : "Todas as camadas desligadas · saída preta.");
         if (!video) {
-          $("video-name").textContent = "Player de vídeo";
-          $("video-help").textContent = "Escolha um vídeo e aperte play para reproduzir nos LEDs.";
-          $("video-message").textContent = refreshError || (starting || videoStarting ? "Iniciando vídeo…"
+          setText("video-name", "Player de vídeo");
+          setText("video-help", "Escolha um vídeo e aperte play para reproduzir nos LEDs.");
+          setText("video-message", refreshError || (starting || videoStarting ? "Iniciando vídeo…"
             : startAvailable && videos.length ? "Pronto para iniciar. O vídeo será repetido ao chegar ao fim."
-            : "Nenhum vídeo disponível para iniciar.");
+            : "Nenhum vídeo disponível para iniciar."));
           return;
         }
-        $("video-name").textContent = video.name;
+        setText("video-name", video.name);
         if (!videoPausing) {
           videoPaused = Boolean(video.paused);
           if (videoConnected && (videoPaused || !$("video-preview-wrap").open || activeTab !== "video"))
-            videoPreview.pause();
+            if (!videoPreview.paused) videoPreview.pause();
           renderVideoPauseButton();
         }
         const reactive = video.audio_reactive;
-        $("video-help").textContent = !video.connected
+        if (activeTab === "video" && $("video-preview-wrap").open
+            && videoPreview.playbackRate !== (video.playback_speed || 1))
+          videoPreview.playbackRate = video.playback_speed || 1;
+        setText("video-help", !video.connected
           ? "Prévia no navegador; o painel de LEDs está desconectado."
+          : video.audio_motion
+            ? `Slow → fast: ${video.playback_speed.toFixed(2)}× · ${video.fps.toFixed(2)} FPS to LEDs.`
           : reactive?.enabled
             ? `Movimento do vídeo: ${video.content_fps.toFixed(1)} FPS · envio aos LEDs: ${video.fps.toFixed(2)} FPS.`
-            : `Reproduzindo na matriz de LEDs a ${video.fps.toFixed(2)} FPS.`;
-        $("video-audio-status").textContent = video.connected && !outputLayers.audio_palette
+            : `Reproduzindo na matriz de LEDs a ${video.fps.toFixed(2)} FPS.`);
+        setText("video-audio-status", video.audio_motion
+          ? "Music energy controls Adaptive video tint, saturation, brightness and playback speed."
+          : video.connected && !outputLayers.audio_palette
           ? "Camada de áudio desligada."
           : !reactive?.enabled
           ? "Textura de áudio ao vivo indisponível nesta prévia."
           : reactive.audible
             ? `Áudio do Mac ativo · energia ${Math.round(reactive.energy * 100)}% · saturação ${Math.round(reactive.saturation * 100)}%.`
-            : "Aguardando música no áudio do Mac · paleta circular em cores calmas.";
+            : "Aguardando música no áudio do Mac · paleta circular em cores calmas.");
         $("video-progress").max = Math.max(0, video.duration - 1 / video.fps);
         if (!videoEditing) {
           const position = !video.connected && videoPreview.readyState >= 1
             ? videoPreview.currentTime : video.position;
           $("video-progress").value = position;
-          $("video-current").textContent = formatTime(position);
+          setText("video-current", formatTime(position));
         }
-        $("video-duration").textContent = formatTime(video.duration);
-        $("video-message").textContent = !video.connected
+        setText("video-duration", formatTime(video.duration));
+        setText("video-message", !video.connected
           ? "Escolha um trecho na prévia ou na linha do tempo."
           : video.seeking ? "Indo para o momento escolhido…"
           : video.paused ? "Vídeo pausado."
-          : video.playing ? "Vídeo tocando nos LEDs." : "Reprodução concluída.";
+          : video.playing ? "Vídeo tocando nos LEDs." : "Reprodução concluída.");
       }
       async function seekVideo(seconds, syncPreview = true, playPreview = false) {
         if (videoSeeking || videoPausing) return;
         videoSeeking = true;
-        $("video-controls").disabled = true;
-        $("video-message").textContent = "Indo para o momento escolhido…";
+        setFlag("video-controls", "disabled", true);
+        setText("video-message", "Indo para o momento escolhido…");
         try {
           if (syncPreview) setPreviewTime(seconds);
           if (playPreview && previewAvailable && (!videoConnected ||
@@ -803,15 +977,15 @@
           $("video-time-input").value = "";
           renderVideo(data.video, previewAvailable);
         } catch (error) {
-          $("video-message").textContent = error.message;
+          setText("video-message", error.message);
         } finally {
           videoSeeking = false;
-          $("video-controls").disabled = false;
+          setFlag("video-controls", "disabled", false);
         }
       }
       $("video-progress").addEventListener("input", () => {
         videoEditing = true;
-        $("video-current").textContent = formatTime(Number($("video-progress").value));
+        setText("video-current", formatTime(Number($("video-progress").value)));
       });
       $("video-progress").addEventListener("change", () => {
         videoEditing = false;
@@ -819,7 +993,7 @@
       });
       $("video-seek").addEventListener("click", () => {
         try { seekVideo(parseTime($("video-time-input").value), true, true); }
-        catch (error) { $("video-message").textContent = error.message; }
+        catch (error) { setText("video-message", error.message); }
       });
       $("video-time-input").addEventListener("keydown", (event) => {
         if (event.key === "Enter") $("video-seek").click();
@@ -828,7 +1002,7 @@
       async function toggleLayer(layer, checkbox) {
         if (layersChanging) return;
         layersChanging = true;
-        $("output-layers").disabled = true;
+        setFlag("output-layers", "disabled", true);
         try {
           const data = await request("/api/video/layers", {
             method: "POST",
@@ -839,10 +1013,10 @@
           renderVideo(data.video, previewAvailable);
         } catch (error) {
           checkbox.checked = outputLayers[layer];
-          $("video-message").textContent = error.message;
+          setText("video-message", error.message);
         } finally {
           layersChanging = false;
-          $("output-layers").disabled = !videoConnected;
+          setFlag("output-layers", "disabled", !videoConnected);
         }
       }
       $("layer-video").addEventListener("change", () => toggleLayer("video", $("layer-video")));
@@ -856,11 +1030,11 @@
               await videoPreview.play();
             } else videoPreview.pause();
             renderVideoPauseButton();
-          } catch (error) { $("video-message").textContent = error.message; }
+          } catch (error) { setText("video-message", error.message); }
           return;
         }
         videoPausing = true;
-        $("video-controls").disabled = true;
+        setFlag("video-controls", "disabled", true);
         try {
           const data = await request("/api/video/playback", {
             method: "POST",
@@ -874,27 +1048,48 @@
             videoPreview.play().catch(() => {});
           }
         } catch (error) {
-          $("video-message").textContent = error.message;
+          setText("video-message", error.message);
         } finally {
           videoPausing = false;
-          $("video-controls").disabled = false;
+          setFlag("video-controls", "disabled", false);
         }
+      });
+      $("video-library-refresh").addEventListener("click", async () => {
+        setFlag("video-library-refresh", "disabled", true);
+        setText("video-library-status", "Atualizando vídeos locais…");
+        try {
+          await request("/api/video/library");
+        } catch (error) {
+          setText("video-library-status", error.message);
+        } finally {
+          setFlag("video-library-refresh", "disabled", false);
+        }
+      });
+      $("video-file").addEventListener("change", () => {
+        videoLaunchMessage = null;
+        $("motion-file").value = $("video-file").value;
+        motionLaunchError = null;
       });
       $("video-play").addEventListener("click", async () => {
         if (videoStarting || refreshing) return;
+        const selectedVideo = $("video-file").value;
+        const selectedName = selectedVideo.split("/").pop();
+        if (!selectedVideo) return;
         videoStarting = true;
         refreshError = null;
-        $("video-play").disabled = true;
-        $("video-file").disabled = true;
-        $("refresh").disabled = true;
-        $("controls").disabled = true;
-        $("video-play").textContent = "Iniciando…";
-        $("video-message").textContent = "Abrindo vídeo e conectando ao painel…";
+        videoLaunchMessage = `Abrindo ${selectedName}…`;
+        setText("video-library-status", videoLaunchMessage);
+        setFlag("video-play", "disabled", true);
+        setFlag("video-file", "disabled", true);
+        setFlag("refresh", "disabled", true);
+        setFlag("controls", "disabled", true);
+        setText("video-play", "Iniciando…");
+        setText("video-message", "Abrindo vídeo e conectando ao painel…");
         try {
           const previous = await request("/api/video/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ video: $("video-file").value }),
+            body: JSON.stringify({ video: selectedVideo }),
           });
           const deadline = Date.now() + 45000;
           while (Date.now() < deadline) {
@@ -903,7 +1098,11 @@
             try { current = await request("/api/state"); } catch { continue; }
             if (current.session && current.session !== previous.session) {
               if (current.mode !== "video") throw new Error("Não foi possível iniciar o vídeo. Tente novamente.");
-              setTab("video");
+              if (current.video?.name !== selectedName) {
+                throw new Error("O player voltou para outro vídeo. Selecione o arquivo e tente novamente.");
+              }
+              setText("video-library-status", `Reproduzindo ${selectedName}.`);
+              setTab(current.video.audio_motion ? "motion" : "video");
               window.location.reload();
               return;
             }
@@ -912,13 +1111,36 @@
         } catch (error) {
           videoStarting = false;
           refreshError = error.message;
-          $("video-message").textContent = error.message;
+          videoLaunchMessage = error.message;
+          setText("video-library-status", error.message);
+          setFlag("video-file", "disabled", false);
+          setFlag("video-play", "disabled", false);
+          setText("video-play", "▶ Tentar novamente");
+          setText("video-message", error.message);
           status(error.message, "error");
         }
       });
+      let youtubeSession = null;
+      let youtubeStartingAt = null;
+      $("youtube-launch").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setFlag("youtube-play", "disabled", true);
+        setText("youtube-status", "Consultando vídeo do YouTube…");
+        try {
+          const result = await request("/api/youtube/start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: $("youtube-url").value }),
+          });
+          youtubeSession = result.session;
+          youtubeStartingAt = null;
+        } catch (error) {
+          setText("youtube-status", error.message);
+          setFlag("youtube-play", "disabled", false);
+        }
+      });
       function status(message, state = "live") {
-        $("status").textContent = message;
-        $("status").dataset.state = state;
+        setText("status", message);
+        if ($("status").dataset.state !== state) $("status").dataset.state = state;
       }
       async function request(path, options = {}) {
         const response = await fetch(path, {
@@ -930,70 +1152,84 @@
           throw new Error(data.error || "Could not update palette");
         return data;
       }
+      let paletteKey = null, previewPixels = null, dotMask = null;
       function draw(data) {
-        $("strip").replaceChildren(
-          ...data.palette.map((rgb) => {
-            const cell = document.createElement("span");
-            cell.style.background = `rgb(${rgb.join(",")})`;
-            return cell;
-          }),
-        );
-        const canvas = $("preview");
-        const rows = data.frame.length;
-        const columns = data.frame[0].length;
-        const cellWidth = canvas.width / columns;
-        const cellHeight = canvas.height / rows;
-        $("preview-size").textContent = `${columns} × ${rows}`;
-        canvas.setAttribute("aria-label", `Live ${columns} by ${rows} audio visualization`);
-        context.clearRect(0, 0, canvas.width, canvas.height);
-        data.frame.forEach((row, y) =>
-          row.forEach((rgb, x) => {
-            context.fillStyle = `rgb(${rgb.map((v) => videoConnected
-              ? Math.min(255, v * 12) : Math.max(12, v)).join(",")})`;
-            if (videoConnected) {
-              context.fillRect(x * cellWidth, y * cellHeight, cellWidth, cellHeight);
-              return;
-            }
-            context.beginPath();
-            context.arc(
-              (x + 0.5) * cellWidth, (y + 0.5) * cellHeight,
-              Math.min(cellWidth, cellHeight) * 0.3125, 0, Math.PI * 2,
-            );
-            context.fill();
-          }),
-        );
+        const key = JSON.stringify(data.palette);
+        if (key !== paletteKey) {
+          const strip = $("strip");
+          if (strip.children.length !== data.palette.length)
+            strip.replaceChildren(...data.palette.map(() => document.createElement("span")));
+          data.palette.forEach((rgb, index) => {
+            const color = `rgb(${rgb.join(",")})`;
+            if (strip.children[index].style.background !== color)
+              strip.children[index].style.background = color;
+          });
+          paletteKey = key;
+        }
+        const size = data.frame.size || data.frame.length;
+        setText("preview-size", `${size} × ${size}`);
+        const label = `Live ${size} by ${size} audio visualization`;
+        if ($("preview").getAttribute("aria-label") !== label)
+          $("preview").setAttribute("aria-label", label);
+        drawVideoLed(data.frame, $("preview"), !videoConnected);
       }
-      function drawVideoLed(frame) {
-        if (!frame?.length || !frame[0]?.length) return;
-        const rows = frame.length;
-        const columns = frame[0].length;
+      function drawVideoLed(frame, canvas = videoLedCanvas, dots = false) {
+        if (!frame) return;
+        const rows = frame.size || frame.length;
+        const columns = frame.size || frame[0]?.length;
+        if (!rows || !columns) return;
         if (videoPixelCanvas.width !== columns) videoPixelCanvas.width = columns;
         if (videoPixelCanvas.height !== rows) videoPixelCanvas.height = rows;
-        const pixels = videoPixelContext.createImageData(columns, rows);
-        for (let y = 0; y < rows; y++) {
-          for (let x = 0; x < columns; x++) {
-            const rgb = frame[y][x];
-            const offset = (y * columns + x) * 4;
-            pixels.data[offset] = Math.min(255, rgb[0] * 12);
-            pixels.data[offset + 1] = Math.min(255, rgb[1] * 12);
-            pixels.data[offset + 2] = Math.min(255, rgb[2] * 12);
-            pixels.data[offset + 3] = 255;
+        if (!previewPixels || previewPixels.width !== columns || previewPixels.height !== rows) {
+          previewPixels = videoPixelContext.createImageData(columns, rows);
+          for (let offset = 3; offset < previewPixels.data.length; offset += 4)
+            previewPixels.data[offset] = 255;
+        }
+        const pixels = previewPixels.data;
+        for (let index = 0; index < rows * columns; index++) {
+          for (let channel = 0; channel < 3; channel++) {
+            const value = frame.rgb ? frame.rgb[index * 3 + channel]
+              : frame[Math.floor(index / columns)][index % columns][channel];
+            pixels[index * 4 + channel] = dots ? Math.max(12, value) : Math.min(255, value * 12);
           }
         }
-        videoPixelContext.putImageData(pixels, 0, 0);
-        videoLedContext.imageSmoothingEnabled = false;
-        videoLedContext.drawImage(videoPixelCanvas, 0, 0,
-                                  videoLedCanvas.width, videoLedCanvas.height);
+        videoPixelContext.putImageData(previewPixels, 0, 0);
+        const targetContext = canvas === videoLedCanvas ? videoLedContext : canvas.getContext("2d");
+        targetContext.clearRect(0, 0, canvas.width, canvas.height);
+        targetContext.imageSmoothingEnabled = false;
+        targetContext.drawImage(videoPixelCanvas, 0, 0, canvas.width, canvas.height);
+        if (dots) {
+          const key = `${columns}:${rows}:${canvas.width}:${canvas.height}`;
+          if (dotMask?.key !== key) {
+            const mask = document.createElement("canvas");
+            mask.width = canvas.width;
+            mask.height = canvas.height;
+            const maskContext = mask.getContext("2d");
+            const cellWidth = canvas.width / columns, cellHeight = canvas.height / rows;
+            for (let y = 0; y < rows; y++) {
+              for (let x = 0; x < columns; x++) {
+                maskContext.beginPath();
+                maskContext.arc((x + 0.5) * cellWidth, (y + 0.5) * cellHeight,
+                  Math.min(cellWidth, cellHeight) * 0.3125, 0, Math.PI * 2);
+                maskContext.fill();
+              }
+            }
+            dotMask = { key, canvas: mask };
+          }
+          targetContext.globalCompositeOperation = "destination-in";
+          targetContext.drawImage(dotMask.canvas, 0, 0);
+          targetContext.globalCompositeOperation = "source-over";
+        }
       }
       function markSelection() {
-        $("palette-name").textContent = names[settings.preset];
+        setText("palette-name", names[settings.preset]);
         const adaptive = settings.preset === "adaptive";
-        $("blend").disabled = adaptive || settings.preset === "moving-rainbow";
-        $("palette-motion").hidden = settings.preset !== "moving-rainbow";
-        $("palette-adaptive").hidden = !adaptive;
-        $("colors").hidden = adaptive;
-        $("add").hidden = adaptive;
-        $("color-order").hidden = adaptive;
+        setFlag("blend", "disabled", adaptive || settings.preset === "moving-rainbow");
+        setFlag("palette-motion", "hidden", settings.preset !== "moving-rainbow");
+        setFlag("palette-adaptive", "hidden", !adaptive);
+        setFlag("colors", "hidden", adaptive);
+        setFlag("add", "hidden", adaptive);
+        setFlag("color-order", "hidden", adaptive);
         document
           .querySelectorAll(".preset")
           .forEach((button) =>
@@ -1002,7 +1238,7 @@
               String(button.dataset.preset === settings.preset),
             ),
           );
-        $("add").disabled = settings.colors.length >= 6;
+        setFlag("add", "disabled", settings.colors.length >= 6);
       }
       function renderColors() {
         $("colors").replaceChildren();
@@ -1060,7 +1296,7 @@
       function renderSettings() {
         renderColors();
         $("blend").value = settings.blend;
-        $("reverse").checked = settings.reverse;
+        setFlag("reverse", "checked", settings.reverse);
         for (const key of ["brightness", "saturation"]) {
           $(key).value = key === "brightness"
             ? Math.round(settings[key] * 1000) / 10
@@ -1178,8 +1414,8 @@
         resettingBoards = true;
         boardResetSubmitting = true;
         boardResetError = null;
-        $("reset-boards").disabled = true;
-        $("reset-boards").textContent = "Resetting…";
+        setFlag("reset-boards", "disabled", true);
+        setText("reset-boards", "Resetting…");
         status("Resetting LED boards…", "pending");
         try {
           const result = await request("/api/boards/reset", {
@@ -1191,24 +1427,35 @@
         } catch (error) {
           resettingBoards = false;
           boardResetError = error.message;
-          $("reset-boards").textContent = "↻ Reset boards";
+          setText("reset-boards", "↻ Reset boards");
           status(error.message, "error");
         } finally {
           boardResetSubmitting = false;
         }
       });
       $("refresh").addEventListener("click", async () => {
-        if (refreshing) return;
+        if (refreshing || resettingBoards || videoStarting) return;
         refreshing = true;
         refreshError = null;
+        const latestSettings = settings && structuredClone(settings);
         pending = null;
-        $("controls").disabled = true;
-        $("refresh").disabled = true;
-        $("reset-boards").disabled = true;
-        $("refresh").textContent = "Refreshing…";
-        status("Restarting visualizer…", "pending");
+        setFlag("controls", "disabled", true);
+        setFlag("refresh", "disabled", true);
+        setFlag("reset-boards", "disabled", true);
+        setText("refresh", "Resetting & reloading…");
+        status("Resetting LED hardware and reloading the app…", "pending");
         try {
-          const previous = await request("/api/refresh", {
+          // Finish any older edit before saving the latest slider positions.
+          const saveDeadline = Date.now() + 5000;
+          while (sending && Date.now() < saveDeadline)
+            await new Promise(resolve => setTimeout(resolve, 50));
+          if (sending) throw new Error("Wait for palette settings to finish saving, then retry.");
+          if (latestSettings) await request("/api/palette", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(latestSettings),
+          });
+          const previous = await request("/api/reset", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: "{}",
@@ -1222,14 +1469,17 @@
               window.location.reload();
               return;
             }
+            if (current.board_reset?.revision === previous.board_reset.revision
+                && current.board_reset.status === "error")
+              throw new Error(current.board_reset.error || "Could not reset the LED controller.");
           }
           throw new Error("Could not reconnect. Relaunch the app from the Dock.");
         } catch (error) {
           refreshing = false;
           sending = false;
           refreshError = error.message;
-          $("refresh").disabled = false;
-          $("refresh").textContent = "↻ Refresh app";
+          setFlag("refresh", "disabled", false);
+          setText("refresh", "↻ Reset & reload");
           status(error.message, "error");
         }
       });
@@ -1242,10 +1492,31 @@
         }
         const version = editVersion;
         try {
-          const data = decodePreview(await request("/api/state?compact=1"));
+          const data = await request("/api/state?compact=1");
+          if (!document.hidden) decodePreview(data);
+          if (youtubeSession && data.session !== youtubeSession) {
+            setTab(data.video?.audio_motion ? "motion" : "video");
+            window.location.reload();
+            return;
+          }
+          setFlag("youtube-launch", "hidden", !data.youtube_available);
+          const youtubeBusy = ["downloading", "starting"].includes(data.youtube?.status);
+          setFlag("youtube-play", "disabled", Boolean(data.video_starting));
+          setFlag("youtube-url", "disabled", Boolean(data.video_starting));
+          if (data.youtube?.message) setText("youtube-status", data.youtube.message);
+          if (youtubeBusy && !youtubeSession) youtubeSession = data.session;
+          if (data.youtube?.status === "starting") {
+            youtubeStartingAt ??= Date.now();
+            if (Date.now() - youtubeStartingAt > 45000) {
+              setText("youtube-status", "O vídeo foi baixado, mas o player não iniciou. Confira a conexão USB.");
+            }
+          }
+          if (data.youtube?.status === "error") youtubeSession = null;
           dataFps = Math.max(1, data.video?.fps || 30);
           if (refreshing || videoStarting) { setTimeout(poll, 250); return; }
-          if (activeTab === null) setTab(location.hash === "#audio" ? "audio"
+          if (activeTab === null) setTab(location.hash === "#motion" ? "motion"
+            : location.hash === "#audio" ? "audio"
+            : data.video?.audio_motion && !location.hash ? "motion"
             : data.mode === "video" || location.hash === "#video" ? "video" : "audio");
           const videoMode = data.mode === "video";
           const reactiveVideo = videoMode && Boolean(data.video?.audio_reactive?.enabled);
@@ -1259,37 +1530,48 @@
           if (!boardResetSubmitting && (!resettingBoards || currentReset) && data.board_reset?.status === "error") {
             boardResetError = data.board_reset.error || "Could not reset the LED boards.";
           }
-          $("reset-boards").disabled = !data.board_reset_available || boardBusy || resettingBoards;
-          $("reset-boards").textContent = boardBusy || resettingBoards ? "Resetting…" : "↻ Reset boards";
-          $("audio-tab").disabled = videoMode && !reactiveVideo;
+          setFlag("reset-boards", "disabled", !data.board_reset_available || boardBusy || resettingBoards);
+          setText("reset-boards", boardBusy || resettingBoards ? "Resetting…" : "↻ Reset boards");
+          setFlag("audio-tab", "disabled", videoMode && !reactiveVideo);
           renderVideo(data.video, data.video_file_available, data.video_start_available, data.videos, data.video_starting);
-          if (videoMode) {
-            $("app-eyebrow").textContent = "LED studio / vídeo";
-            $("app-title").textContent = "Player de vídeo";
-            $("app-description").textContent = data.video?.connected
-              ? "Ligue ou desligue cada camada da saída final e ajuste a paleta na aba Audio palette."
-              : "Explore o vídeo e escolha momentos sem conectar o painel.";
-            $("preview-description").textContent = "Saída final com as camadas habilitadas, enviada aos LEDs.";
-            $("preview-note").textContent = "A prévia amplia os valores de brilho para mostrar os detalhes; os limites de segurança continuam ativos nos LEDs.";
-            $("slowdown-help").textContent = "Controla a velocidade das ondas e suaviza as mudanças de cor. O brilho continua reagindo ao áudio em cada quadro.";
-            $("palette-adaptive").textContent = "Quiet music brings dark purple and blue. Medium energy shows coral and violet. Strong energy moves to orange and amber, with blue-violet treble accents. The outer circle fades to black before the board’s edge. Colors blend gradually while each beat changes the glow. Slowdown makes the color transitions more gradual.";
-          } else {
-            $("app-eyebrow").textContent = "System audio / LED studio";
-            $("app-title").textContent = "Live palette";
-            $("app-description").textContent = "Shape the colors and motion. Let the music do the rest.";
-            $("preview-description").textContent = "The live frame sent to your LEDs.";
-            $("preview-note").textContent = "The preview stays dark when audio is silent. Brightness adjusts the palette; the music still controls each note’s glow.";
-            $("slowdown-help").textContent = "Slide right to slow the motion, left to speed it up. Frames blend smoothly in between. Wave mode adds thicker sine and cosine curves.";
-            $("palette-adaptive").textContent = "Sections near the song’s recent maximum energy and peak dB glow with warm, vivid colors. Quieter sections drift toward a darker, softer Ocean palette of blue, cyan, and teal. Colors follow the music, the brightness slider sets the intensity, and Slowdown makes the transitions more gradual.";
+          renderMotion(data);
+          const modeKey = `${data.mode}:${Boolean(data.video?.audio_motion)}:${videoConnected}`;
+          if (renderedMode !== modeKey) {
+            renderedMode = modeKey;
+            if (videoMode) {
+              setText("app-eyebrow", "LED studio / vídeo");
+              setText("app-title", "Player de vídeo");
+              setText("app-description", data.video?.connected
+                ? "Ligue ou desligue cada camada da saída final e ajuste a paleta na aba Audio palette."
+                : "Explore o vídeo e escolha momentos sem conectar o painel.");
+              setText("preview-description", "Saída final com as camadas habilitadas, enviada aos LEDs.");
+              setText("preview-note", "A prévia amplia os valores de brilho para mostrar os detalhes; os limites de segurança continuam ativos nos LEDs.");
+              setText("slowdown-help", "Controla a velocidade das ondas e suaviza as mudanças de cor. O brilho continua reagindo ao áudio em cada quadro.");
+              setText("palette-adaptive", "Quiet music brings dark purple and blue. Medium energy shows coral and violet. Strong energy moves to orange and amber, adding yellow, gold, pink and violet near maximum energy, with blue-violet treble accents. The outer circle fades to black before the board’s edge. Colors blend gradually while each beat changes the glow. Slowdown makes the color transitions more gradual.");
+              if (data.video?.audio_motion) {
+                setText("app-title", "Slow → fast video");
+                setText("app-description", "Calm music: dim blue-purple at 0.8×. Full, energetic music: bright warm colors up to 1.5×.");
+                setText("slowdown-help", "Smooths tint, saturation, brightness and speed together, and slows the circular waves. Higher slowdown gives longer, gentler transitions.");
+                setText("palette-adaptive", "Adaptive tints the video's own detail: dim blue and purple during calm music, then vivid orange and amber as the song builds. Near 100% energy, bright yellow, gold, pink and violet wave around the video's shapes with a gentle curve. Maximum color intensity, waves and speed require bass, mids and highs together. Brightness and saturation set the upper limits.");
+              }
+            } else {
+              setText("app-eyebrow", "System audio / LED studio");
+              setText("app-title", "Live palette");
+              setText("app-description", "Shape the colors and motion. Let the music do the rest.");
+              setText("preview-description", "The live frame sent to your LEDs.");
+              setText("preview-note", "The preview stays dark when audio is silent. Brightness adjusts the palette; the music still controls each note’s glow.");
+              setText("slowdown-help", "Slide right to slow the motion, left to speed it up. Frames blend smoothly in between. Wave mode adds thicker sine and cosine curves.");
+              setText("palette-adaptive", "Sections near the song’s recent maximum energy and peak dB glow with warm, vivid colors. Quieter sections drift toward a darker, softer Ocean palette of blue, cyan, and teal. Colors follow the music, the brightness slider sets the intensity, and Slowdown makes the transitions more gradual.");
+            }
           }
-          $("refresh").disabled = videoMode || !data.refresh_available;
-          $("controls").disabled = videoMode && !reactiveVideo;
+          setFlag("refresh", "disabled", !data.system_reset_available || boardBusy || resettingBoards);
+          setFlag("controls", "disabled", videoMode && !reactiveVideo);
           if (!settings) {
             presets = data.presets;
             settings = data.settings;
             buildPresets();
             renderSettings();
-            $("controls").disabled = videoMode && !reactiveVideo;
+            setFlag("controls", "disabled", videoMode && !reactiveVideo);
           }
           if (!pending && !sending && version === editVersion) {
             if (revision !== data.revision) {
@@ -1297,8 +1579,9 @@
               revision = data.revision;
               renderSettings();
             }
-            if (drawnFrameKey !== previewFrameKey) {
+            if (!document.hidden && data.frame && drawnFrameKey !== previewFrameKey) {
               if (activeTab === "video" && videoMode && data.video?.connected) drawVideoLed(data.frame);
+              else if (activeTab === "motion" && data.video?.audio_motion) drawVideoLed(data.frame, $("motion-preview"));
               else if (activeTab === "audio") draw(data);
               drawnFrameKey = previewFrameKey;
             }
@@ -1315,10 +1598,11 @@
           if (pending && !sending) flush();
         } catch (error) {
           status("Disconnected · waiting for visualizer", "error");
-          $("refresh").disabled = true;
-          $("reset-boards").disabled = true;
+          setFlag("refresh", "disabled", true);
+          setFlag("reset-boards", "disabled", true);
         }
-        const interval = activeTab === "video" && !videoConnected ? 250
+        const interval = document.hidden ? 1000
+          : activeTab === "video" && !videoConnected ? 250
           : videoConnected ? 1000 / Math.min(60, dataFps) : 33;
         setTimeout(poll, Math.max(0, interval - (performance.now() - pollStarted)));
       }

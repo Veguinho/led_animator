@@ -69,3 +69,34 @@ For a single trial or an optional profile:
 
 `--profile PATH` saves a cProfile file. Profiled CPU numbers should not be used
 for before/after comparisons because profiling adds overhead.
+
+For a fixed budget of 50 candidate iterations, including the variable-speed
+Slow → fast mode, use:
+
+```sh
+.venv/bin/python scripts/research_video_cpu.py VIDEO.mp4 \
+  --motion --start 1094 --seconds 5 --warmup 1 --poll-fps 30 \
+  --compact --iterations 50 --patience 50 \
+  --output .build/cpu-50/trials.jsonl
+```
+
+The baseline is recorded separately, so this produces 51 rows. Confirmation
+measurements do not consume candidate iterations. `--modules DIRECTORY` can
+benchmark a saved source snapshot; keep its companion HTML and Python modules
+together. Motion trials use the real timeline selector, including decoding
+additional source frames as audio increases playback speed. Both modes now
+receive the same 4096-sample audio window used by the live melody tracker.
+
+The CPU improvements also include bounded byte lookup tables for gamma and
+RGB565 preview expansion, direct three-channel arithmetic in pixel limiting
+and video tinting, and melody floor estimates restricted to the frequencies
+that its fundamental and harmonic searches use. Gamma lookup retains the
+float32 arithmetic and rounding of the previous implementation; non-byte
+frames use the general calculation. The existing flash and firmware PWM
+limits still apply.
+
+The browser keeps a reusable byte buffer and ImageData, caches the circular
+LED mask, and updates text, control flags and palette swatches only when they
+change. Hidden pages skip decoding and drawing and poll once per second.
+Visible previews continue at the existing frame rate. Reload an already open
+controls tab to load these changes.

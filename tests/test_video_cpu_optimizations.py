@@ -12,12 +12,58 @@ import led_animator
 from audio_palette_controls import PaletteControls, PaletteServer
 from system_audio_visualizer import AudioCapture
 from audio_energy import AdaptiveAudioEnergy
-from stream_arduino import _rgb565_pwm_totals, VIDEO_FIRMWARE_OUTPUT_SCALE
+from stream_arduino import (
+    _rgb565_pwm_totals, VIDEO_FIRMWARE_OUTPUT_SCALE, limit_video_flash, decode_rgb565_frame,
+)
 from video_audio_texture import LiveAudioVideoTexture
 from video_controls import VideoPlaybackControls
 
 
 class CpuOptimizationTests(unittest.TestCase):
+    def test_preview_lookup_matches_every_wire_color_and_returns_owned_pixels(self):
+        packed = np.arange(65536, dtype="<u2").reshape(256, 256)
+        red, green, blue = (packed >> 11) & 31, (packed >> 5) & 63, packed & 31
+        expected = np.stack(((red << 3) | (red >> 2), (green << 2) | (green >> 4),
+                             (blue << 3) | (blue >> 2)), axis=-1).astype(np.uint8)
+        decoded = decode_rgb565_frame(packed.tobytes(), 256)
+        np.testing.assert_array_equal(decoded, expected)
+        decoded.fill(0)
+        np.testing.assert_array_equal(decode_rgb565_frame(packed.tobytes(), 256), expected)
+
+    def test_gamma_lookup_matches_float_path_for_every_peak_and_channel(self):
+        channel = np.arange(256, dtype=np.uint8)
+        for gamma in (0.5, 1.0, 2.2, 3.0):
+            for peak in range(256):
+                values = np.minimum(channel, peak)
+                frame = np.stack((np.full_like(values, peak), values, values[::-1]), axis=-1)[None]
+                np.testing.assert_array_equal(
+                    led_animator.map_led_intensity(frame, gamma),
+                    led_animator.map_led_intensity(frame.astype(np.float32), gamma),
+                )
+
+    def test_pixel_limiter_preserves_existing_threshold_and_rounding_rules(self):
+        frame = np.random.default_rng(17).integers(0, 256, (256, 256, 3), dtype=np.uint8)
+        values = frame.astype(np.float32)
+        total = values.sum(axis=2, keepdims=True)
+        peak = values.max(axis=2, keepdims=True)
+        strong = np.count_nonzero(values >= peak * 0.45, axis=2, keepdims=True)
+        limit = np.where(strong == 3, 36.0, np.where(strong == 2, 24.0, 32.0))
+        values *= np.minimum(1.0, limit / np.maximum(total, 1.0))
+        np.minimum(values, 20.0, out=values)
+        np.testing.assert_array_equal(limit_video_flash(frame), np.rint(values).astype(np.uint8))
+
+    def test_settings_and_preset_snapshots_cannot_mutate_live_state(self):
+        controls = PaletteControls(size=48)
+        original = controls.settings_snapshot()[1]
+        snapshot = controls.settings_snapshot()[1]
+        snapshot["colors"].append("#ffffff")
+        snapshot["brightness"] = 0
+        state = controls.state(compact=True)
+        state["settings"]["colors"].clear()
+        state["presets"]["adaptive"].clear()
+        self.assertEqual(controls.settings_snapshot()[1], original)
+        self.assertTrue(controls.state(compact=True)["presets"]["adaptive"])
+
     def test_pwm_lookup_preserves_firmware_total_for_all_rgb565_colors(self):
         packed = np.arange(65536, dtype=np.uint32)
         red5, green6, blue5 = (packed >> 11) & 31, (packed >> 5) & 63, packed & 31

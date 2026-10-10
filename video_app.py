@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
-import time
+import os
+import sys
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -16,13 +18,22 @@ from video_controls import VideoPlaybackControls
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Preview and seek a video without the LED board")
-    parser.add_argument("video", type=Path, help="local MP4 file")
+    parser.add_argument("video", nargs="?", type=Path, help="local MP4 file")
+    parser.add_argument("--youtube", metavar="URL", help="download a YouTube video at up to 360p, then preview")
     parser.add_argument("--fps", type=float, default=None,
                         help="intended LED playback rate (default: video's original frame rate)")
     parser.add_argument("--start", type=float, default=0.0, help="initial time in seconds")
     parser.add_argument("--controls-port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
+    if bool(args.video) == bool(args.youtube):
+        parser.error("choose a local video or --youtube URL")
+    if args.youtube:
+        from youtube_video import download_youtube
+        try:
+            args.video = download_youtube(args.youtube, progress=lambda message: print(message, flush=True))
+        except (OSError, RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
     if not args.video.is_file():
         parser.error(f"video does not exist: {args.video}")
     if not 0 <= args.controls_port <= 65535:
@@ -35,19 +46,37 @@ def main(argv: list[str] | None = None) -> int:
     fps = min(args.fps, source_fps) if args.fps is not None else source_fps
     controls = VideoPlaybackControls(args.video.name, duration, fps, args.start,
                                      connected=False)
+    switch_requested = threading.Event()
+    requested_video: Path | None = None
+
+    def start_video(path: Path) -> None:
+        nonlocal requested_video
+        requested_video = path
+        switch_requested.set()
+
     server = PaletteServer(PaletteControls(), args.controls_port,
-                           video_controls=controls, video_path=args.video)
+                           video_controls=controls, video_path=args.video,
+                           on_video_start=start_video)
     server.start()
     print(f"Video app (LED board not required): {server.url}/#video", flush=True)
     if not args.no_browser:
         webbrowser.open(f"{server.url}/#video")
     try:
-        while True:
-            time.sleep(3600)
+        switch_requested.wait()
     except KeyboardInterrupt:
         return 0
     finally:
         server.close()
+    next_args = [sys.executable, str(Path(__file__).resolve()), str(requested_video),
+                 "--controls-port", str(server.port), "--no-browser"]
+    if args.fps is not None:
+        next_args.extend(["--fps", str(args.fps)])
+    try:
+        os.execv(sys.executable, next_args)
+    except OSError as exc:
+        print(f"error: could not start video preview: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

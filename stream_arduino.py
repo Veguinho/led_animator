@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import struct
 import sys
+import threading
 import time
 import zlib
 from collections.abc import Callable, Iterator
@@ -30,7 +32,9 @@ from led_animator import (
 )
 from video_controls import VideoPlaybackControls
 from board_controls import BoardResetControls
+from app_reload import save_reload_state, take_reload_state
 from video_audio_texture import LiveAudioVideoTexture
+from video_motion import LiveAudioVideoMotion, MotionVideoTimeline
 
 
 WIDTH = 16
@@ -97,6 +101,7 @@ class FrameSource:
     # pacing/dropping, then encode the frame immediately before USB output.
     prepare_frame: Callable[[bytes], bytes] | None = None
     on_frame_sent: Callable[[bytes], None] | None = None
+    maintains_position: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,15 +223,18 @@ class VideoFrameEncoder:
 
     def __init__(self, fps: float, gamma: float, size: int,
                  limiter: VideoFlashLimiter | None,
-                 texture: LiveAudioVideoTexture | None) -> None:
+                 texture: LiveAudioVideoTexture | LiveAudioVideoMotion | None) -> None:
         self.fps, self.gamma, self.size = fps, gamma, size
         self.limiter, self.texture = limiter, texture
         self.frame_hold = AdaptiveVideoFrameHold()
+        self.select_frame: Callable[[np.ndarray], np.ndarray] | None = None
 
     def prepare(self, rgb: bytes) -> bytes:
         grid = np.frombuffer(rgb, dtype=np.uint8).reshape(self.size, self.size, 3)
         if self.texture is not None:
             def select(frame: np.ndarray) -> np.ndarray:
+                if self.select_frame is not None:
+                    return self.select_frame(frame)
                 if self.texture.video_controls.is_paused():
                     if self.frame_hold.frame is None:
                         self.frame_hold.frame = frame.copy()
@@ -269,7 +277,7 @@ def iter_compiled_video(
     flash_limit: bool = False,
     limiter: VideoFlashLimiter | None = None,
     start_seconds: float = 0.0,
-    texture: LiveAudioVideoTexture | None = None,
+    texture: LiveAudioVideoTexture | LiveAudioVideoMotion | None = None,
 ) -> Iterator[bytes]:
     """Decode, sample, resize, and RGB565-encode without saving the video."""
     limiter = limiter or (VideoFlashLimiter(output_fps) if flash_limit else None)
@@ -286,7 +294,7 @@ def open_video(
     led_gamma: float = LED_INTENSITY_GAMMA,
     size: int = 16,
     flash_limit: bool = False,
-    texture: LiveAudioVideoTexture | None = None,
+    texture: LiveAudioVideoTexture | LiveAudioVideoMotion | None = None,
 ) -> FrameSource:
     if not path.is_file():
         raise ValueError(f"video does not exist: {path}")
@@ -303,6 +311,15 @@ def open_video(
     limiter = VideoFlashLimiter(fps) if flash_limit else None
     if texture is not None:
         encoder = VideoFrameEncoder(fps, led_gamma, size, limiter, texture)
+        if texture.video_controls.audio_motion is True:
+            timeline = MotionVideoTimeline(info.fps, texture.video_controls,
+                lambda seconds: iter_square_video_frames(path, info, size, start_seconds=seconds))
+            encoder.select_frame = timeline.select
+            return FrameSource(
+                fps=fps, size=size, iter_frames=timeline.frames_at,
+                iter_frames_at=timeline.frames_at, prepare_frame=encoder.prepare,
+                on_frame_sent=encoder.publish, maintains_position=True,
+            )
 
         def reactive_frames_at(seconds: float = 0.0) -> Iterator[bytes]:
             # Start seeks/repeats with the new image; keep exposure state.
@@ -343,10 +360,11 @@ def probe_video_duration(path: Path) -> float:
 def limit_video_flash(frame: np.ndarray) -> np.ndarray:
     """Bound each LED's total light and strongest channel before RGB565."""
     values = frame.astype(np.float32)
-    total = values.sum(axis=2, keepdims=True)
-    peak = values.max(axis=2, keepdims=True)
-    strong_channels = np.count_nonzero(values >= peak * 0.45,
-                                       axis=2, keepdims=True)
+    red, green, blue = values[..., 0], values[..., 1], values[..., 2]
+    total = (red + green + blue)[..., None]
+    threshold = np.maximum(np.maximum(red, green), blue) * 0.45
+    strong_channels = ((red >= threshold).astype(np.uint8)
+                       + (green >= threshold) + (blue >= threshold))[..., None]
     # Cyan/magenta/yellow stage lights can be as dazzling as white even
     # though their third channel is dark. Give those pixels their own cap.
     # RGB565 needs a little more input for neutral pixels to reach the same
@@ -393,17 +411,25 @@ def encode_limited_video_rgb565(frame: np.ndarray) -> bytes:
     raise RuntimeError("video pixel PWM limit did not converge")
 
 
-def decode_rgb565_frame(payload: bytes, size: int) -> np.ndarray:
-    """Expand the exact encoded LED colors for the browser preview."""
-    packed = np.frombuffer(payload, dtype="<u2").reshape(size, size)
+@lru_cache(maxsize=1)
+def _rgb565_colors() -> np.ndarray:
+    """Byte-exact preview colors for the 65,536 possible wire values."""
+    packed = np.arange(65536, dtype=np.uint16)
     red = (packed >> 11) & 31
     green = (packed >> 5) & 63
     blue = packed & 31
-    frame = np.empty((size, size, 3), dtype=np.uint8)
+    frame = np.empty((65536, 3), dtype=np.uint8)
     frame[..., 0] = (red << 3) | (red >> 2)
     frame[..., 1] = (green << 2) | (green >> 4)
     frame[..., 2] = (blue << 3) | (blue >> 2)
+    frame.flags.writeable = False
     return frame
+
+
+def decode_rgb565_frame(payload: bytes, size: int) -> np.ndarray:
+    """Expand the exact encoded LED colors for the browser preview."""
+    packed = np.frombuffer(payload, dtype="<u2").reshape(size, size)
+    return _rgb565_colors()[packed]
 
 
 class VideoFlashLimiter:
@@ -585,6 +611,7 @@ def stream_frames(
     controls: VideoPlaybackControls | None = None,
     board_controls: BoardResetControls | None = None,
     video_mode: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int, int]:
     if drop_late and rebase_late:
         raise ValueError("drop_late and rebase_late cannot both be enabled")
@@ -636,6 +663,8 @@ def stream_frames(
             return None
         paused_at = None
         while controls.is_paused():
+            if should_stop is not None and should_stop():
+                return None
             if paused_at is None:
                 paused_at = time.monotonic()
             reset_processed = check_board_reset(adjust_clock=False)
@@ -656,6 +685,8 @@ def stream_frames(
         return controls.take_seek()
 
     while True:
+        if should_stop is not None and should_stop():
+            return sent, dropped
         frames_this_pass = 0
         pass_start: float | None = None
         seek_to: float | None = None
@@ -665,10 +696,14 @@ def stream_frames(
                   if source.iter_frames_at is not None else source.iter_frames())
         try:
             for payload in frames:
+                if should_stop is not None and should_stop():
+                    break
                 check_board_reset()
                 if last_raw_frame is None and source.prepare_frame is not None:
                     last_raw_frame = payload
                 seek_to = check_video_controls()
+                if should_stop is not None and should_stop():
+                    break
                 if seek_to is not None:
                     break
                 frames_this_pass += 1
@@ -696,11 +731,13 @@ def stream_frames(
                 if now < deadline:
                     time.sleep(deadline - now)
                 seek_to = check_video_controls()
+                if should_stop is not None and should_stop():
+                    break
                 if seek_to is not None:
                     break
                 last_raw_frame = payload
                 send_output(payload)
-                if controls is not None:
+                if controls is not None and not source.maintains_position:
                     controls.set_position(pass_start_seconds + pass_index * period)
                 if sent == 1:
                     print(
@@ -727,6 +764,8 @@ def stream_frames(
             pass_start_seconds = seek_to
             last_raw_frame = None
             continue
+        if should_stop is not None and should_stop():
+            return sent, dropped
         if frames_this_pass == 0:
             raise RuntimeError("video produced no frames")
         if not loop:
@@ -742,6 +781,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_display_argument(parser)
     parser.add_argument("video", nargs="?", type=Path, help="input MP4 video")
+    parser.add_argument("--youtube", metavar="URL", help="download a YouTube video at up to 360p, then play")
     parser.add_argument(
         "--port", default="auto", help="serial port (default: auto-detect)"
     )
@@ -770,6 +810,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="disable 48x48 video highlight and transition limiting")
     parser.add_argument("--no-audio-reactive", action="store_true",
                         help="play the video's original colors without live system audio")
+    parser.add_argument("--audio-motion", action="store_true",
+                        help="scale playback linearly from 0.8x at 0% energy to 1.5x at 100% Adaptive energy")
     parser.add_argument("--audio-response", choices=("immediate", "smooth"), default="immediate",
                         help="video motion response (default: immediate; overlay attacks at the center and fades softly)")
     parser.add_argument("--no-compression", action="store_true",
@@ -810,7 +852,9 @@ def main(argv: list[str] | None = None) -> int:
         for port in list_serial_ports():
             print(port)
         return 0
-    if args.video is None:
+    if args.video is not None and args.youtube:
+        raise SystemExit("error: choose a local video or --youtube URL")
+    if args.video is None and not args.youtube:
         raise SystemExit("error: VIDEO.mp4 is required unless --list-ports is used")
     if args.timeout <= 0:
         raise SystemExit("error: --timeout must be positive")
@@ -820,18 +864,46 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: --retries cannot be negative")
     if not 0 <= args.controls_port <= 65535:
         raise SystemExit("error: --controls-port must be between 0 and 65535")
+    if args.audio_motion and args.no_audio_reactive:
+        raise SystemExit("error: --audio-motion requires live system audio")
 
     connection: SerialConnection | None = None
     control_server = None
     capture = None
     board_controls = BoardResetControls()
+    switch_requested = threading.Event()
+    requested_video: Path | None = None
+    requested_motion = False
+    reset_reload = False
+
+    def reload_after_reset() -> None:
+        nonlocal reset_reload
+        reset_reload = True
+        switch_requested.set()
+
+    def start_video(path: Path) -> None:
+        nonlocal requested_video, requested_motion
+        requested_video = path
+        requested_motion = args.audio_motion
+        switch_requested.set()
+
+    def start_motion(path: Path) -> None:
+        nonlocal requested_video, requested_motion
+        requested_video, requested_motion = path, True
+        switch_requested.set()
+
     try:
+        reload_state = take_reload_state()
+        if args.youtube:
+            from youtube_video import download_youtube
+            args.video = download_youtube(args.youtube, progress=lambda message: print(message, file=sys.stderr))
         duration = probe_video_duration(args.video)
         video_fps = probe_video(args.video).fps
         controls = VideoPlaybackControls(
             args.video.name, duration,
             min(args.fps, video_fps) if args.fps is not None else video_fps,
             args.start,
+            audio_motion=args.audio_motion,
         )
         from audio_palette_controls import PaletteControls, PaletteServer, default_settings
         palette_path = Path(__file__).resolve().parent / ".build" / "audio-palette.json"
@@ -850,13 +922,23 @@ def main(argv: list[str] | None = None) -> int:
                 palette_controls.update(default_settings() | {
                     "preset": "adaptive", "brightness": 1.0,
                 })
-            controls.set_layers({"audio_palette": True})
-            texture = LiveAudioVideoTexture(
-                palette_controls, controls, capture.latest, size=args.display_size,
-                immediate=args.audio_response == "immediate",
-            )
-            print("Live Mac system audio drives a separate circular palette output layer.",
+            if args.audio_motion:
+                texture = LiveAudioVideoMotion(palette_controls, controls, capture.latest,
+                                               size=args.display_size, gamma=args.led_gamma)
+            else:
+                controls.set_layers({"audio_palette": True})
+                texture = LiveAudioVideoTexture(
+                    palette_controls, controls, capture.latest, size=args.display_size,
+                    immediate=args.audio_response == "immediate",
+                )
+            print("Live Mac audio drives Adaptive video tint, brightness and playback from 0.8x to 1.5x." if args.audio_motion else
+                  "Live Mac system audio drives a separate circular palette output layer.",
                   file=sys.stderr)
+        if reload_state.get("palette") is not None:
+            palette_controls.update(reload_state["palette"])
+        if reload_state.get("video") is not None:
+            controls.set_layers(reload_state["video"]["layers"])
+            controls.set_paused(reload_state["video"]["paused"])
         source = open_video(args.video, args.fps, args.led_gamma, args.display_size,
                             flash_limit=args.display_size == 48 and not args.no_flash_limit,
                             texture=texture)
@@ -872,12 +954,16 @@ def main(argv: list[str] | None = None) -> int:
                   video_mode=args.display_size == 48 and not args.no_flash_limit)
         control_server = PaletteServer(palette_controls, args.controls_port,
                                        video_controls=controls, video_path=args.video,
-                                       board_controls=board_controls)
+                                       board_controls=board_controls,
+                                       on_reset=lambda: board_controls.request(on_complete=reload_after_reset),
+                                       on_video_start=start_video,
+                                       on_motion_start=start_motion if capture is not None else None)
         control_server.start()
-        print(f"Video controls: {control_server.url}/#video", file=sys.stderr)
+        controls_tab = "motion" if args.audio_motion else "video"
+        print(f"Video controls: {control_server.url}/#{controls_tab}", file=sys.stderr)
         if not args.no_browser:
             import webbrowser
-            webbrowser.open(f"{control_server.url}/#video")
+            webbrowser.open(f"{control_server.url}/#{controls_tab}")
         print(
             f"Converting and streaming at {source.fps:.3f} FPS. Ctrl-C stops.",
             file=sys.stderr,
@@ -888,16 +974,19 @@ def main(argv: list[str] | None = None) -> int:
             loop=args.loop,
             timeout=args.timeout,
             retries=args.retries,
-            drop_late=not args.no_drop,
+            drop_late=not args.no_drop and not args.audio_motion,
+            rebase_late=args.audio_motion,
             display_size=args.display_size,
             compress=args.display_size == 48 and not args.no_compression,
             start_seconds=args.start,
             controls=controls,
             board_controls=board_controls,
             video_mode=args.display_size == 48 and not args.no_flash_limit,
+            should_stop=switch_requested.is_set,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
-        return 0
+        if requested_video is None and not reset_reload:
+            return 0
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
         return 130
@@ -924,6 +1013,46 @@ def main(argv: list[str] | None = None) -> int:
             connection.close()
         if capture is not None:
             capture.close()
+
+    # Release the HTTP, audio and serial resources before opening the next MP4.
+    if reset_reload:
+        args.port = port
+        video_state = controls.state()
+        args.start = min(video_state["position"], max(0.0, duration - 1.0 / source.fps))
+        save_reload_state(palette_controls.settings_snapshot()[1], {
+            "paused": video_state["paused"], "layers": video_state["layers"],
+        })
+    else:
+        args.video = requested_video
+        args.audio_motion = requested_motion
+        args.start = 0.0
+        args.loop = True
+        # Playing a selected file should make its image visible, while keeping
+        # the user's choice about the audio overlay instead of enabling it again.
+        save_reload_state(palette_controls.settings_snapshot()[1], {
+            "paused": False,
+            "layers": {"video": True, "audio_palette":
+                       False if requested_motion else controls.output_layers()["audio_palette"]},
+        })
+    args.youtube = None
+    args.controls_port = control_server.port
+    args.no_browser = True
+    restart_args = [str(args.video)]
+    for name, value in vars(args).items():
+        if name == "video" or value is None:
+            continue
+        flag = "--" + name.replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                restart_args.append(flag)
+        else:
+            restart_args.extend([flag, str(value)])
+    try:
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *restart_args])
+    except OSError as exc:
+        print(f"error: could not start video: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

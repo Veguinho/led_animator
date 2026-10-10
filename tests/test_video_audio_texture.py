@@ -15,6 +15,7 @@ class VideoAudioTextureTests(unittest.TestCase):
     def test_adaptive_video_colors_pass_through_cool_middle_and_warm_stages(self):
         quiet = make_video_energy_palette(0)
         middle = make_video_energy_palette(0.5)
+        warm = make_video_energy_palette(0.8)
         energetic = make_video_energy_palette(1)
         self.assertGreater(float(quiet[:, 2].mean()), float(quiet[:, 0].mean()) * 2)
         self.assertLess(int(quiet.max()), 100)
@@ -24,8 +25,11 @@ class VideoAudioTextureTests(unittest.TestCase):
             palette = make_video_energy_palette(energy).astype(float)
             green = palette[:, 1] > np.maximum(palette[:, 0], palette[:, 2])
             self.assertFalse(np.any(green))
-        self.assertTrue(np.all(energetic[:, 0] > energetic[:, 2] * 2))
-        self.assertLess(float(energetic[:, 1].mean()), float(energetic[:, 0].mean()) * 0.55)
+        yellow = (energetic[:, 0] > 240) & (energetic[:, 1] > 200) & (energetic[:, 2] < 100)
+        self.assertGreater(int(yellow.sum()), 10)
+        self.assertGreater(int(energetic[-1, 2]), int(energetic[-1, 0]))
+        self.assertGreater(int(energetic[-12, 0]), int(energetic[-12, 1]) * 2)
+        self.assertGreater(float(energetic.mean()), float(warm.mean()))
         self.assertGreater(float(energetic[:, 1].mean()), float(quiet[:, 1].mean()) * 4)
         self.assertGreater(float(energetic.mean()), float(middle.mean()))
         self.assertGreater(float(middle.mean()), float(quiet.mean()))
@@ -33,7 +37,7 @@ class VideoAudioTextureTests(unittest.TestCase):
             make_video_energy_palette(0.5, reverse=True), middle[::-1],
         )
         np.testing.assert_array_equal(make_video_energy_palette(0.1), quiet)
-        np.testing.assert_array_equal(make_video_energy_palette(0.8), energetic)
+        np.testing.assert_array_equal(make_video_energy_palette(0.82), warm)
 
     def setUp(self):
         self.controls = PaletteControls(size=48)
@@ -220,7 +224,7 @@ class VideoAudioTextureTests(unittest.TestCase):
         # Full-strength screening would raise this video to 222. The overlay
         # now contributes less than half of that lift, preserving its detail.
         self.assertGreater(int(blended[0, 0, 0]), 100)
-        self.assertLess(int(blended[0, 0, 0]), 161)
+        self.assertLess(int(blended[0, 0, 0]), 140)
         np.testing.assert_array_equal(compose_output_layers(
             video, palette, {"video": False, "audio_palette": True},
         ), palette)
@@ -315,8 +319,9 @@ class VideoAudioTextureTests(unittest.TestCase):
             expanded = self.texture.render(flat, bass, 1 / 30)
             changes.append(float(np.abs(expanded[outer_ring].astype(float)
                                         - quiet[outer_ring]).mean()))
-        self.assertGreater(changes[-1], 10)
-        self.assertGreater(changes[-1], changes[0] + 10)
+        # The softer palette still arrives outward with a visible front.
+        self.assertGreater(changes[-1], 7)
+        self.assertGreater(changes[-1], changes[0] + 7)
 
     def test_transparency_front_reaches_successive_rings_and_decelerates(self):
         phase = np.arange(1024) / 48_000

@@ -61,6 +61,7 @@ mids occupy the middle, and
 higher frequencies move the response toward the center. The video adaptive
 palette is dark purple and blue at low energy, coral and violet in the middle,
 and warmer orange and amber at high energy, with blue-violet treble accents.
+Near maximum energy, the palette adds bright yellow, gold, pink and violet.
 The adaptive circle darkens smoothly beyond 70% of the board's half-width
 and reaches black at 94%, leaving a dark margin before the border.
 Color, brightness, and transparency
@@ -75,9 +76,22 @@ flashing the whole overlay between cool and warm colors. The spectrum uses the l
 samples (21.3 ms at 48 kHz); amplitude uses only the latest 256 (5.3 ms).
 **Slowdown** changes wave travel and release, without delaying the central attack.
 The upper outer ring bends gently with the current audio waveform and settles back
-in silence. Over video, the audio palette blends at 45% strength in calm sections;
+in silence. A thin, pale circular string follows the prominent melodic line
+on top of the palette. Its FFT tracker searches 180–3,000 Hz for tonal peaks,
+reinforces related harmonics, rejects broadband noise, and favors the current
+note when peaks nearly tie. The selected note and its first two overtones bend
+the closed string; its own amplitude makes the loop breathe and brighten.
+This estimates the melody from the mix rather than separating instruments.
+Melody analysis uses the latest 4,096 samples (85.3 ms at 48 kHz); the existing
+palette and video-motion analysis still use 1,024 samples with the newest
+256 samples for immediate amplitude. The string releases gently in silence,
+shares the audio brightness/saturation controls and **Audio palette circular**
+switch, and keeps moving when video is paused or hidden.
+Over video, the audio palette blends at 30% strength in calm sections;
 its local opacity rises gently with the expanding pulse to preserve
-the source detail; the palette keeps its full strength when shown alone.
+the source detail. Its colors are also 10% dimmer, including when shown alone.
+The foreground string has its own brighter blend so it stays legible above the
+softer circular colors.
 Immediate audio response is the default for video motion. Use
 `--audio-response smooth` to ease that motion's energy and band controls.
 Both modes use the same immediate central attack and soft outward release
@@ -295,13 +309,17 @@ without the interface. The panel uses Python's standard library and is available
 only on this Mac. An already-running visualizer needs a restart to load the new
 controls.
 
-Click **Refresh app** at the top of the controls page to restart the visualizer
-and reload the page in the same tab. The button briefly pauses the LEDs, closes
-the audio and USB connections, then loads the current code and reconnects.
-Live edits are restored when running the background service or using
-`--settings-file PATH`; other streams reset to startup settings. The Dock launcher
-prevents a second app stream from starting during refresh. The background service
-automatically restarts a worker that exits.
+Click **Reset & reload** in the app header to reset the LED controller and reload
+the running Python software in either live audio or video mode. The app saves
+the latest palette edits, resets the hardware between frames, then closes the
+audio, video-decoder, HTTP, and USB resources before loading the current code.
+It reconnects the same browser tab and USB port, preserving the palette,
+video position, pause state, output-layer switches, and playback options.
+If the controller reset fails, the app shows the error without requesting a
+software reload; the button can be retried. **Reset boards** remains available
+for a hardware-only reset. These buttons are disabled in previews without a
+controller. The Dock launcher prevents competing streams during reload, and
+the background service automatically restarts a worker that exits.
 
 Both styles follow the audio level in dBFS: loud passages grow and glow more,
 while quiet passages stay smaller and dimmer.

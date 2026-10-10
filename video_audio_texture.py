@@ -11,6 +11,7 @@ import numpy as np
 
 from audio_energy import AdaptiveAudioEnergy
 from audio_palette_controls import PaletteControls, default_settings, make_palette
+from melody_fft import MelodyFFT
 from video_controls import VideoPlaybackControls
 
 
@@ -21,10 +22,14 @@ VIDEO_ENERGY_STOPS = np.array([
     [[165, 20, 47], [215, 40, 24], [187, 49, 27], [115, 32, 164], [38, 58, 140]],
     # Energetic: warmer orange and amber, with less green in the gold accents.
     [[233, 70, 8], [246, 101, 9], [255, 135, 20], [255, 166, 39], [255, 187, 75]],
+    # Peak: bright yellow/gold with pink and violet, never green-dominant.
+    [[255, 142, 24], [255, 215, 38], [255, 232, 72], [255, 86, 154], [156, 104, 255]],
 ], dtype=np.float32)
 
-# Keep the palette vivid on its own, but let video detail show through it.
-VIDEO_OVERLAY_OPACITY = 0.45
+# Keep the circular colors behind the brighter melody string and video detail.
+VIDEO_OVERLAY_OPACITY = 0.30
+PALETTE_VISIBILITY = 0.90
+MELODY_STRING_OPACITY = 0.88
 HIGH_WAVE_COLOR = np.array([32, 156, 245], dtype=np.float32)
 ADAPTIVE_HIGH_WAVE_COLOR = np.array([64, 80, 245], dtype=np.float32)
 # Equalize the circular layer before its three visual regions are combined.
@@ -58,15 +63,18 @@ def _video_energy_stages(size: int) -> np.ndarray:
 
 def make_video_energy_palette(energy: float, *, size: int = 48,
                               reverse: bool = False) -> np.ndarray:
-    """Move smoothly from cool colors through coral/violet to orange/amber."""
+    """Move from cool through warm colors to a bright, varied peak mix."""
     stages = _video_energy_stages(size)
     level = float(np.clip(energy, 0.0, 1.0))
     if level <= 0.5:
         lower = 0
         blend = float(np.clip((level - 0.1) / 0.4, 0.0, 1.0))
-    else:
+    elif level <= 0.82:
         lower = 1
         blend = float(np.clip((level - 0.5) / 0.3, 0.0, 1.0))
+    else:
+        lower = 2
+        blend = (level - 0.82) / 0.18
     blend = blend * blend * (3.0 - 2.0 * blend)
     palette = np.rint(stages[lower] * (1.0 - blend) + stages[lower + 1] * blend)
     result = palette.clip(0, 255).astype(np.uint8)
@@ -81,7 +89,10 @@ def _spatial_energy_colors(stages: np.ndarray, energy: np.ndarray) -> np.ndarray
     blend = (blend * blend * (3.0 - 2.0 * blend))[..., None]
     lower = np.where(warm[..., None], stages[1], stages[0])
     upper = np.where(warm[..., None], stages[2], stages[1])
-    return lower * (1.0 - blend) + upper * blend
+    colors = lower * (1.0 - blend) + upper * blend
+    peak = np.clip((energy - 0.82) / 0.18, 0.0, 1.0)
+    peak = (peak * peak * (3.0 - 2.0 * peak))[..., None]
+    return colors * (1.0 - peak) + stages[3] * peak
 
 
 def compose_output_layers(video: np.ndarray, audio_palette: np.ndarray,
@@ -118,6 +129,8 @@ class LiveAudioVideoTexture:
         # 21 ms of spectrum history instead of 43 ms; amplitude uses only
         # the newest 5 ms below, so transients do not wait for a full FFT.
         self.energy = AdaptiveAudioEnergy(fft_size=1_024, bands=CIRCULAR_AUDIO_BANDS)
+        self.melody = MelodyFFT()
+        self.melody_rotation = 0.0
         self.settings = default_settings() | {"preset": "adaptive", "brightness": 1.0}
         self.revision = -1
         self.phase = 0.0
@@ -202,6 +215,29 @@ class LiveAudioVideoTexture:
         displacement = self.size * 0.025 * strength * self.top_wave_region * contour
         return self.radius - displacement
 
+    def _melody_string(self) -> np.ndarray:
+        """A narrow, softly antialiased string in front of the circular colors."""
+        strength = self.melody.strength
+        if strength <= 0.0:
+            return np.zeros((self.size, self.size, 3), dtype=np.float32)
+        contour = self.melody.contour(self.angle, self.melody_rotation)
+        # Leave room for the existing outer bass ring and the central treble.
+        string_radius = self.size * (
+            0.25 + 0.045 * self.melody.pitch + 0.018 * strength
+            + 0.045 * strength * contour
+        )
+        distance = np.abs(self.radius - string_radius)
+        width = max(0.42, self.size * 0.011)
+        line = np.exp(-0.5 * (distance / width) ** 2)
+        halo = np.exp(-0.5 * (distance / (width * 2.4)) ** 2)
+        # Perceptual gain keeps a quieter lead readable in a bass-heavy mix.
+        intensity = np.sqrt(strength) * (0.88 * line + 0.12 * halo)
+        # Pale palette colors keep the thin string legible over every preset.
+        color = self.palette[self.size // 2].astype(np.float32) * 0.22 + 198.0
+        color = color.mean() + (color - color.mean()) * self.settings["saturation"]
+        gain = self.settings["brightness"] ** (1.0 / 2.2)
+        return intensity[..., None] * color * gain
+
     def _kaleidoscope_radius(self, radius: np.ndarray, local_energy: np.ndarray,
                             local_pulse: np.ndarray) -> np.ndarray:
         """Fold energetic outer rings into eight mirrored petals and finer facets."""
@@ -255,7 +291,7 @@ class LiveAudioVideoTexture:
         now = time.monotonic()
         elapsed = 0.0 if self.last_time is None else max(0.0, now - self.last_time)
         self.last_time = now
-        samples = (self.latest_samples(self.energy.fft_size)
+        samples = (self.latest_samples(self.melody.fft_size)
                    if self.latest_samples is not None else np.empty(0))
         return self.render(frame, samples, elapsed, select_frame=select_frame)
 
@@ -277,6 +313,7 @@ class LiveAudioVideoTexture:
             raise ValueError("video texture requires a native-size RGB frame")
         layers = self.video_controls.output_layers()
         if not layers["audio_palette"] or self.latest_samples is None:
+            self.melody.reset()
             self.mapping_envelope.fill(0.0)
             self.mapping_history.clear()
             self._outer_color_fields.fill(0.0)
@@ -292,6 +329,7 @@ class LiveAudioVideoTexture:
             self._outer_color_fields.fill(0.0)
             self._outer_color_arrival.fill(self.mapping_clock)
             if settings["preset"] != self.settings["preset"]:
+                self.melody.reset()
                 self.energy.reset()
                 self.visual_energy = 0.0
                 self.phase = 0.0
@@ -306,6 +344,10 @@ class LiveAudioVideoTexture:
         audio_level = (float(np.sqrt(np.mean(np.square(recent, dtype=np.float64))))
                        * self.sensitivity if len(recent) else 0.0)
         audible = audio_level >= 0.0005
+        self.melody.update(samples, elapsed, sensitivity=self.sensitivity, audible=audible)
+        self.melody_rotation = (self.melody_rotation + min(max(elapsed, 0.0), 0.1)
+                                * (0.35 + 0.35 * self.melody.pitch
+                                   + 0.65 * self.melody.strength)) % (2.0 * np.pi)
         if not audible:
             energy_target = 0.0
         # Smooth controls rather than video frames. Beats attack on the current
@@ -437,6 +479,11 @@ class LiveAudioVideoTexture:
         ), 0.0)
         high_tint = (0.85 * highs.ravel()[self._color_pixels]
                      * (0.55 + 0.45 * color_high_crest))[:, None]
+        if self.settings["preset"] == "adaptive":
+            # Keep the treble blue-violet even against the brighter peak gold.
+            peak = np.clip((local_energy.ravel()[self._color_pixels] - 0.82) / 0.18, 0.0, 1.0)
+            peak = peak * peak * (3.0 - 2.0 * peak)
+            high_tint = np.maximum(high_tint, (0.85 * highs.ravel()[self._color_pixels] * peak)[:, None])
         high_color = (ADAPTIVE_HIGH_WAVE_COLOR if self.settings["preset"] == "adaptive"
                       else HIGH_WAVE_COLOR)
         circular_palette = (circular_palette * (1.0 - high_tint)
@@ -469,7 +516,7 @@ class LiveAudioVideoTexture:
         if self.settings["preset"] == "adaptive":
             result *= (self._outer_color_gain(fields) * self._adaptive_edge_gain)[..., None]
         shine = crest * (0.22 * bass + 0.08 * mids) + 0.22 * highs * high_crest
-        result = np.rint(result * (gain * (
+        result = np.rint(result * (PALETTE_VISIBILITY * gain * (
             1.0 + 0.04 * motion * wave + shine
         ))[..., None])\
             .clip(0, 255).astype(np.uint8)
@@ -480,7 +527,13 @@ class LiveAudioVideoTexture:
         self.video_controls.set_audio_reactivity(energy, center_saturation, audible)
         # Transparency carries the same expanding envelope as color and glow.
         opacity = VIDEO_OVERLAY_OPACITY * (1.0 + 0.12 * local_pulse)
-        return compose_output_layers(frame, result, layers, opacity=opacity)
+        composed = compose_output_layers(frame, result, layers, opacity=opacity)
+        # Compose last, at its own opacity: reducing the circular wash must not
+        # make the melody disappear. Both remain under the audio layer switch.
+        string = self._melody_string() * MELODY_STRING_OPACITY
+        source = composed.astype(np.float32)
+        return np.rint(source + string * (1.0 - source / 255.0))\
+            .clip(0, 255).astype(np.uint8)
 
     def publish_frame(self, frame: np.ndarray) -> None:
         self.controls.publish_frame(frame, self.palette)

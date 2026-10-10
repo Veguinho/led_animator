@@ -8,7 +8,7 @@ import threading
 
 class VideoPlaybackControls:
     def __init__(self, name: str, duration: float, fps: float, start: float = 0.0,
-                 *, connected: bool = True) -> None:
+                 *, connected: bool = True, audio_motion: bool = False) -> None:
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("video duration must be positive")
         self.name = name
@@ -16,6 +16,8 @@ class VideoPlaybackControls:
         self.fps = fps
         self._content_fps = fps
         self.connected = connected
+        self.audio_motion = audio_motion
+        self._playback_speed = 1.0
         self._lock = threading.Lock()
         self._position = self.validate_position(start)
         self._pending_seek: float | None = None
@@ -25,7 +27,7 @@ class VideoPlaybackControls:
         self._audio_energy = 0.0
         self._audio_saturation = 0.0
         self._audio_audible = False
-        self._layers = {"video": True, "audio_palette": True}
+        self._layers = {"video": True, "audio_palette": not audio_motion}
 
     def validate_position(self, seconds: object) -> float:
         if type(seconds) not in (int, float) or not math.isfinite(seconds):
@@ -67,6 +69,8 @@ class VideoPlaybackControls:
             or not layers.keys() <= {"video", "audio_palette"}
             or any(type(enabled) is not bool for enabled in layers.values())):
             raise ValueError("layers must contain video or audio_palette booleans")
+        if self.audio_motion and layers.get("audio_palette") is True:
+            raise ValueError("slow-to-fast mode tints the video directly; use normal video mode for the separate audio palette layer")
         with self._lock:
             self._layers.update(layers)
             if not self._layers["audio_palette"]:
@@ -114,10 +118,22 @@ class VideoPlaybackControls:
         with self._lock:
             return self._content_fps
 
+    def set_playback_speed(self, speed: float) -> None:
+        if not math.isfinite(speed) or not 0.8 <= speed <= 1.5:
+            raise ValueError("playback speed must be between 0.8 and 1.5")
+        with self._lock:
+            self._playback_speed = float(speed)
+
+    def playback_speed(self) -> float:
+        with self._lock:
+            return self._playback_speed
+
     def _state_locked(self) -> dict:
         return {
             "name": self.name, "duration": self.duration, "fps": self.fps,
             "content_fps": self._content_fps,
+            "audio_motion": self.audio_motion,
+            "playback_speed": self._playback_speed,
             "texture_mapping_enabled": self._layers["audio_palette"],
             "layers": self._layers.copy(),
             "position": self._position, "playing": self._playing,

@@ -17,7 +17,8 @@ def stop_mode_workers() -> None:
     """Gracefully stop only audio/video workers belonging to this checkout."""
     from audio_service import stop
     stop()
-    targets = {str(ROOT / "system_audio_visualizer.py"), str(ROOT / "preloaded_video/player.py")}
+    targets = {str(ROOT / "system_audio_visualizer.py"), str(ROOT / "preloaded_video/player.py"),
+               str(ROOT / "stream_arduino.py")}
     rows = subprocess.check_output(["ps", "ax", "-o", "pid=,command="], text=True)
     for row in rows.splitlines():
         fields = row.strip().split(None, 1)

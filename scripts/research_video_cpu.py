@@ -80,6 +80,7 @@ def trial(args) -> dict:
     from stream_arduino import VideoFrameEncoder, VideoFlashLimiter
     from video_audio_texture import LiveAudioVideoTexture
     from video_controls import VideoPlaybackControls
+    from video_motion import LiveAudioVideoMotion, MotionVideoTimeline
 
     config = json.loads(args.config)
     config.setdefault("compression", getattr(stream_arduino, "STREAM_COMPRESSION_LEVEL", 3))
@@ -113,12 +114,15 @@ def trial(args) -> dict:
     controls = PaletteControls(size=48)
     controls.update(default_settings() | {"preset": "adaptive", "brightness": 0.969,
                                           "saturation": 1.0, "slowdown": 0.0})
-    video = VideoPlaybackControls(args.video.name, 3600, info.fps)
-    samples = np.zeros(1024, dtype=np.float32)
+    video = VideoPlaybackControls(args.video.name, 3600, info.fps,
+                                  audio_motion=getattr(args, "motion", False))
+    samples = np.zeros(4096, dtype=np.float32)
     texture = LiveAudioVideoTexture(controls, video, lambda count: samples,
                                    size=48, immediate=False)
+    if getattr(args, "motion", False):
+        texture = LiveAudioVideoMotion(controls, video, lambda count: samples, size=48)
     encoder = VideoFrameEncoder(info.fps, 2.2, 48, VideoFlashLimiter(info.fps), texture)
-    server = PaletteServer(controls, 0, video_controls=video, video_path=args.video)
+    server = PaletteServer(controls, 0, video_controls=video, video_path=args.video, video_library={})
     server.start()
     context = multiprocessing.get_context("spawn")
     stop = context.Event()
@@ -126,13 +130,19 @@ def trial(args) -> dict:
     poll_error = context.Array("c", 2048)
     client = context.Process(target=poll_preview,
                              args=(server.url, config, stop, requests, poll_error), daemon=True)
-    frames = led_animator.iter_square_video_frames(args.video, info, 48,
-                                                  start_seconds=args.start)
+    if getattr(args, "motion", False):
+        timeline = MotionVideoTimeline(info.fps, video, lambda seconds:
+            led_animator.iter_square_video_frames(args.video, info, 48, start_seconds=seconds))
+        encoder.select_frame = timeline.select
+        frames = timeline.frames_at(args.start)
+    else:
+        frames = led_animator.iter_square_video_frames(args.video, info, 48,
+                                                      start_seconds=args.start)
     next(frames)  # decoder startup is excluded from steady-state counters
     client.start()
     initial_thermal_limit = thermal_limit()
     count = 0
-    phase = np.arange(1024) / 48000
+    phase = np.arange(len(samples)) / 48000
     cpu_start = None
     begin = time.monotonic()
     measure_start = begin + args.warmup
@@ -152,10 +162,11 @@ def trial(args) -> dict:
                 + 0.6*np.sin(2*np.pi*900*phase) + 0.3*np.sin(2*np.pi*6000*phase))
             if count % 60 > 50:
                 samples[:] = 0
-            payload = encoder.prepare(raw.tobytes())
+            payload = encoder.prepare(raw if isinstance(raw, bytes) else raw.tobytes())
             zlib.compress(payload, config.get("compression", 3))
             encoder.publish(payload)
-            video.set_position(args.start + count / info.fps)
+            if not getattr(args, "motion", False):
+                video.set_position(args.start + count / info.fps)
             count += 1
             if cpu_start is None and time.monotonic() >= measure_start:
                 cpu_start = [process_cpu(os.getpid()), process_cpu(decoders[-1].pid)]
@@ -213,6 +224,8 @@ def search(args):
                    "--worker", "--config", json.dumps(config),
                    "--seconds", str(args.seconds), "--warmup", str(args.warmup),
                    "--start", str(args.start)]
+        if getattr(args, "motion", False):
+            command += ["--motion"]
         if args.modules:
             command += ["--modules", args.modules]
         try:
@@ -253,10 +266,12 @@ def search(args):
             log.write(json.dumps(result) + "\n")
             log.flush()
             print(json.dumps(result), flush=True)
-            if stale >= args.patience:
+            if stale >= args.patience or (getattr(args, "iterations", None) is not None
+                                         and iteration >= args.iterations):
                 break
         summary = {"best": best, "stale_iterations": stale,
-                   "stop_reason": "patience" if stale >= args.patience else "candidates_exhausted",
+                   "stop_reason": "iteration_limit" if (getattr(args, "iterations", None) is not None
+                       and iteration >= args.iterations) else "patience",
                    "iterations": iteration + 1, "threshold_relative_pct": 1.0}
         if args.modules:
             manifest = Path(args.modules)/"manifest.json"
@@ -272,6 +287,8 @@ def main():
     parser.add_argument("--seconds", type=float, default=8)
     parser.add_argument("--warmup", type=float, default=2)
     parser.add_argument("--start", type=float, default=2100)
+    parser.add_argument("--motion", action="store_true", help="benchmark live audio motion and variable-speed decoding")
+    parser.add_argument("--iterations", type=int, help="stop after this many candidates, excluding baseline")
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--poll-fps", type=float, default=60)
     parser.add_argument("--compact", action="store_true", help="use the compact web preview")
@@ -283,6 +300,8 @@ def main():
     args = parser.parse_args()
     if args.seconds <= 0 or args.warmup < 0 or args.patience <= 0 or args.poll_fps <= 0:
         parser.error("seconds, patience and poll-fps must be positive; warmup must be nonnegative")
+    if args.iterations is not None and args.iterations <= 0:
+        parser.error("iterations must be positive")
     if args.worker:
         print(json.dumps(trial(args)))
     else:

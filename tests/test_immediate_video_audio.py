@@ -22,7 +22,7 @@ class ImmediateVideoAudioTests(unittest.TestCase):
         self.frame = np.full((48, 48, 3), 120, dtype=np.uint8)
 
     def latest(self, count):
-        self.assertEqual(count, 1024)
+        self.assertEqual(count, 4096)
         return self.samples
 
     @staticmethod

@@ -17,6 +17,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
@@ -286,6 +287,18 @@ def frame_to_led_grid(frame: np.ndarray, grid_size: int = GRID_SIZE) -> np.ndarr
     return normalized.astype(np.uint8, copy=False)
 
 
+@lru_cache(maxsize=8)
+def _led_intensity_table(gamma: float) -> np.ndarray:
+    """Exact float32 gamma arithmetic for every byte peak/channel pair."""
+    channels = np.arange(256, dtype=np.float32)
+    peak = channels / 255.0
+    scale = np.zeros_like(peak)
+    np.power(peak, gamma - 1.0, out=scale, where=peak > 0)
+    table = np.rint(channels[None, :] * scale[:, None]).clip(0, 255).astype(np.uint8)
+    table.flags.writeable = False
+    return table
+
+
 def map_led_intensity(
     frame: np.ndarray,
     gamma: float = LED_INTENSITY_GAMMA,
@@ -303,10 +316,13 @@ def map_led_intensity(
     if not math.isfinite(gamma) or gamma <= 0:
         raise ValueError("gamma must be a positive finite number")
 
-    source = frame.astype(np.float32, copy=False)
-    peak = source.max(axis=2, keepdims=True) / 255.0
     if gamma == 1.0:
         return frame.astype(np.uint8, copy=True)
+    if frame.dtype == np.uint8:
+        peak = np.maximum(np.maximum(frame[..., 0], frame[..., 1]), frame[..., 2])
+        return _led_intensity_table(gamma)[peak[..., None], frame]
+    source = frame.astype(np.float32, copy=False)
+    peak = np.maximum(np.maximum(source[..., 0], source[..., 1]), source[..., 2])[..., None] / 255.0
     scale = np.zeros_like(peak)
     np.power(peak, gamma - 1.0, out=scale, where=peak > 0)
     return np.rint(source * scale).clip(0, 255).astype(np.uint8)
