@@ -183,7 +183,7 @@ Lava retains its original 16×16 artwork, scaled by the live receiver.
 The other effects render at 48×48; frames are quantized through RGB565 except
 for the original lava artwork and Doom's browser canvas capture. The physical
 panel also applies its firmware brightness and power limits.
-The projectM example uses **cope + flexi – colorful marble (ghost mix)**.
+The projectM example uses **martin - frosty caves 2**.
 [Rebuild all previews](docs/development.md#readme-previews).
 
 ## What you can run

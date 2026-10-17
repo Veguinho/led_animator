@@ -66,7 +66,7 @@ def main():
     parser.add_argument("--seconds", type=int, default=8)
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--projectm-preset", type=Path,
-                        default=PRESETS / "Reaction/Cloudy/cope + flexi - colorful marble (ghost mix).milk")
+                        default=PRESETS / "Fractal/Mandelbox/martin - frosty caves 2.milk")
     args = parser.parse_args()
     if not 1 <= args.seconds <= 16 or not 12 <= args.fps <= 30:
         parser.error("use 1–16 seconds and 12–30 FPS to keep documentation assets small")

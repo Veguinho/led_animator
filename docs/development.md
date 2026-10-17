@@ -80,7 +80,7 @@ The preloaded example uses the real 48×48 clip preparation, default 25%
 intensity and 180 ms smoothing. Wave, spectrum, Adaptive, Doom Fire and video
 effects run at 48×48 with 60% shared brightness and 20% slowdown; lava keeps
 its original 16×16 artwork. The projectM capture uses the native engine and
-**cope + flexi - colorful marble (ghost mix)** preset, after a two-second
+**martin - frosty caves 2** preset, after a two-second
 warmup. Use `--projectm-preset PATH` to select another installed preset.
 
 Doom capture starts an isolated local server and records the actual browser

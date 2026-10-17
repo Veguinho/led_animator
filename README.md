@@ -53,7 +53,7 @@
   </tr>
   <tr>
     <td align="center" colspan="2">
-      <a href="docs/assets/projectm.mp4"><img src="docs/assets/projectm.gif" width="290" alt="Music driven MilkDrop preset rendered by the native projectM engine"></a>
+      <a href="docs/assets/projectm.mp4"><img src="docs/assets/projectm.gif" width="290" alt="martin - frosty caves 2 MilkDrop preset rendered by the native projectM engine"></a>
       <br><strong>projectM / MilkDrop</strong>
     </td>
   </tr>
