@@ -18,5 +18,8 @@ def take_reload_state() -> dict:
     return state
 
 
-def save_reload_state(palette: dict, video: dict | None = None) -> None:
-    os.environ[RELOAD_STATE_KEY] = json.dumps({"palette": palette, "video": video})
+def save_reload_state(palette: dict, video: dict | None = None, *, projectm: dict | None = None) -> None:
+    state = {"palette": palette, "video": video}
+    if projectm is not None:
+        state["projectm"] = projectm
+    os.environ[RELOAD_STATE_KEY] = json.dumps(state)

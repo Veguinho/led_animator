@@ -22,10 +22,10 @@ from app_reload import save_reload_state, take_reload_state
 
 from audio_palette_controls import DEFAULT_SLOWDOWN, PaletteControls, PaletteServer, default_settings, make_adaptive_palette, make_palette, validate_slowdown
 from audio_energy import AdaptiveAudioEnergy
+from doom_fire import DoomFire, DoomFireControls
 from export_arduino import encode_rgb565
 from stream_arduino import (
     DEFAULT_PORT_WAIT,
-    DEFAULT_STREAM_FPS,
     PACKET_CLEAR,
     STATUS_ACK,
     FrameSource,
@@ -50,6 +50,7 @@ FFT_SIZE = 2_048
 MIN_DBFS = -72.0
 MAX_DBFS = -6.0
 DEFAULT_SENSITIVITY = 1.5
+DEFAULT_AUDIO_FPS = 30.0
 RAINBOW_CYCLE_SECONDS = 8.0
 
 
@@ -252,10 +253,10 @@ class AudioVisualizer:
     def __init__(
         self, style: str, sensitivity: float = DEFAULT_SENSITIVITY,
         controls: PaletteControls | None = None, slowdown: float = DEFAULT_SLOWDOWN,
-        *, size: int = GRID_SIZE,
+        *, size: int = GRID_SIZE, fire_controls: DoomFireControls | None = None,
     ) -> None:
-        if style not in {"spectrum", "wave"}:
-            raise ValueError("style must be 'spectrum' or 'wave'")
+        if style not in {"spectrum", "wave", "doom-fire", "projectm"}:
+            raise ValueError("style must be 'spectrum', 'wave', 'doom-fire' or 'projectm'")
         if not np.isfinite(sensitivity) or sensitivity <= 0:
             raise ValueError("sensitivity must be positive")
         if size not in (16, 32, 48):
@@ -264,7 +265,15 @@ class AudioVisualizer:
         validate_slowdown(slowdown)
         self.slowdown = slowdown
         self._delayer = FrameDelayer()
-        self.style = style
+        self.style = "wave" if style in ("doom-fire", "projectm") else style
+        from projectm_controls import ProjectMControls
+        self.projectm = controls.projectm if controls is not None else ProjectMControls(size)
+        self.projectm_fps = 12
+        if style == "projectm":
+            self.projectm.action("start", {})
+        self.fire_controls = fire_controls or DoomFireControls(active=style == "doom-fire")
+        self._fire = DoomFire(size)
+        self._fire_active = False
         self.sensitivity = sensitivity
         self.palette = np.full((self.size, 3), 255, dtype=np.uint8)
         self.controls = controls
@@ -343,6 +352,34 @@ class AudioVisualizer:
                     # Color edits apply immediately, even mid-transition.
                     self.previous.fill(0)
                     self._delayer.reset()
+        projectm_frame = self.projectm.render(
+            samples, self._settings["brightness"], self._settings["saturation"], self.projectm_fps,
+        )
+        if projectm_frame is not None:
+            if self.controls is not None:
+                self.controls.publish_frame(projectm_frame)
+            return projectm_frame
+        samples = samples[-FFT_SIZE:]
+        fire_active = self.fire_controls.state()["active"]
+        if fire_active != self._fire_active:
+            self._fire_active = fire_active
+            self._fire.reset()
+            self.previous.fill(0)
+            self._delayer.reset()
+            if self._output_brightness is not None:
+                self._output_brightness = BrightnessEnvelope()
+        if fire_active:
+            frame = self._fire.render(
+                samples, elapsed, sensitivity=self.sensitivity,
+                brightness=self._settings["brightness"], saturation=self._settings["saturation"],
+                slowdown=self.slowdown,
+            )
+            # The fuel/energy envelope already eases the light level. Blending
+            # pixel positions for half a second erases Doom's red wind trails.
+            self.fire_controls.publish(self._fire.energy, self._fire.height(), self._fire.audible)
+            if self.controls is not None:
+                self.controls.publish_frame(frame, self._fire.palette)
+            return frame
         frame = self._delayer.render(lambda: self._render_frame(samples), self.slowdown)
         display_palette = self.palette
         if self._moving_rainbow:
@@ -517,6 +554,25 @@ def iter_audio_frames(
         yield encode_rgb565(visualizer.render(capture.latest(FFT_SIZE)))
 
 
+def live_audio_source(
+    capture: AudioCapture, visualizer: AudioVisualizer, fps: float,
+    refresh_requested: threading.Event | None = None,
+) -> FrameSource:
+    """Read current PCM after pacing, immediately before the USB send."""
+    visualizer._output_brightness = BrightnessEnvelope()
+    visualizer.projectm_fps = fps
+
+    def ticks() -> Iterator[bytes]:
+        while True:
+            if refresh_requested is not None and refresh_requested.is_set():
+                raise RefreshRequested()
+            yield b""
+
+    return FrameSource(fps=fps, size=visualizer.size, iter_frames=ticks,
+        prepare_frame=lambda _: encode_rgb565(visualizer.render(capture.latest(
+            min(SAMPLE_RATE, max(FFT_SIZE, round(SAMPLE_RATE / fps)))))))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Animate an ESP32 LED screen from Mac system audio"
@@ -524,9 +580,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_display_argument(parser)
     parser.add_argument(
         "--style",
-        choices=("wave", "spectrum"),
+        choices=("wave", "spectrum", "doom-fire", "projectm"),
         default="wave",
-        help="visual style (default: wave)",
+        help="visual style: wave, spectrum, Doom fire or projectM presets (default: wave)",
     )
     parser.add_argument(
         "--sensitivity",
@@ -546,8 +602,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fps",
         type=float,
-        default=DEFAULT_STREAM_FPS,
-        help="LED refresh rate (default: 12 with per-lane 48x48 protection)",
+        default=DEFAULT_AUDIO_FPS,
+        help="live animation updates per second (default: 30)",
     )
     parser.add_argument(
         "--slowdown", type=float, default=DEFAULT_SLOWDOWN,
@@ -639,11 +695,11 @@ def main(argv: list[str] | None = None) -> int:
         visualizer = AudioVisualizer(
             args.style, args.sensitivity, controls, args.slowdown, size=args.display_size,
         )
-        source = FrameSource(
-            fps=args.fps,
-            iter_frames=lambda: iter_audio_frames(capture, visualizer, refresh_requested),
-            size=visualizer.size,
-        )
+        if args.style == "projectm" and reload_state.get("projectm") is not None:
+            saved = reload_state["projectm"]
+            visualizer.projectm.action("preset", {"preset": saved["preset"]})
+            visualizer.projectm.action("settings", {key: saved[key] for key in ("auto", "duration")})
+        source = live_audio_source(capture, visualizer, args.fps, refresh_requested)
         port = resolve_port(args.port, wait_timeout=args.port_wait)
         print(f"Opening {port}...", file=sys.stderr)
         connection = open_serial(port, args.timeout, baudrate=args.baud)
@@ -660,6 +716,7 @@ def main(argv: list[str] | None = None) -> int:
                 controls, args.controls_port, on_refresh=refresh_requested.set,
                 on_video_start=start_video,
                 on_motion_start=start_motion,
+                fire_controls=visualizer.fire_controls,
                 board_controls=board_controls,
                 on_reset=lambda: board_controls.request(on_complete=reload_after_reset),
             )
@@ -667,7 +724,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Live palette controls: {control_server.url}", file=sys.stderr)
             if not args.no_browser:
                 try:
-                    webbrowser.open(control_server.url)
+                    webbrowser.open(control_server.url + ("/#projectm" if args.style == "projectm"
+                        else "/#fire" if args.style == "doom-fire" else ""))
                 except webbrowser.Error:
                     print("Open the controls URL in your browser.", file=sys.stderr)
         stream_frames(
@@ -678,9 +736,14 @@ def main(argv: list[str] | None = None) -> int:
             retries=args.retries,
             drop_late=False,
             rebase_late=True,
+            palette_controls=controls,
+            should_stop=refresh_requested.is_set,
             display_size=args.display_size,
             board_controls=board_controls,
+            compress=True,
         )
+        if refresh_requested.is_set():
+            raise RefreshRequested()
         return 0
     except RefreshRequested:
         print("Starting video..." if requested_video is not None else "Refreshing the app...",
@@ -695,6 +758,10 @@ def main(argv: list[str] | None = None) -> int:
         if control_server is not None:
             control_server.close()
         capture.close()
+        if controls is not None:
+            controls.projectm.close()
+        elif "visualizer" in locals():
+            visualizer.projectm.close()
         if connection is not None:
             if args.clear_on_exit:
                 try:
@@ -717,9 +784,13 @@ def main(argv: list[str] | None = None) -> int:
     assert control_server is not None
     args.controls_port = control_server.port
     args.no_browser = True
+    args.style = ("projectm" if visualizer.projectm.state()["active"] else
+                  "doom-fire" if visualizer.fire_controls.state()["active"] else visualizer.style)
     if reset_reload and controls is not None:
         args.port = port
         save_reload_state(controls.settings_snapshot()[1])
+    if args.style == "projectm" and requested_video is None and controls is not None:
+        save_reload_state(controls.settings_snapshot()[1], projectm=visualizer.projectm.state())
     if requested_video is not None:
         video_args = [
             sys.executable, str(Path(__file__).with_name("stream_arduino.py").resolve()),

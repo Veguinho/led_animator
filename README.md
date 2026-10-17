@@ -1,7 +1,7 @@
 # 💡 LED Animator
 
-Live lava, audio-reactive waves, and video playback on a **48×48 RGB LED
-screen** built from nine 16×16 panels. Python creates the frames; an ESP32-S3
+Lava, audio-reactive waves and flames, MilkDrop presets, video playback,
+and playable Doom on a **48×48 RGB LED screen** built from nine 16×16 panels. Python creates the frames; an ESP32-S3
 drives each panel independently and receives frames through the existing CH340 USB
 connection. The compressed 48×48 video path plays Wex at its original
 29.97 FPS.
@@ -32,7 +32,7 @@ See the [hardware guide](docs/hardware.md) for the current panel mapping.
 
 Live audio starts in dim red at the tested 16/255 level (about 6.3%), with
 manual brightness control, softened frame changes and the normal firmware brightness ceiling of 72/255.
-The previews below show the original 16×16 effects. The
+The gallery below previews every display mode, including the native 48×48 effects. The
 [native 32×32 spectrum preview](docs/32x32-preview.md) documents the earlier
 four-panel mapping; lava still scales its 16×16 artwork.
 
@@ -43,7 +43,7 @@ Choose live audio or locally buffered video with `python main.py`.
 [Preloaded video mode](preloaded_video/README.md) uploads a short clip into
 the board's PSRAM, then plays at 30 FPS by default without streaming each frame
 over USB. Video defaults to 25% pixel intensity and 180 ms of temporal smoothing.
-Its buffer holds up to about 102 seconds at 30 FPS. Switching modes
+Its 48×48 buffer holds up to about **45.5 seconds at 30 FPS**. Switching modes
 installs the corresponding firmware.
 Video loading now uses a tested **2,000,000-baud** connection (about 129 KB/s
 of measured payload throughput); firmware flashing remains at 115200 baud.
@@ -90,6 +90,61 @@ the smoothing of tint, brightness, saturation and speed together. This mode requ
 board; the selected clip must be present in the local library. For a local
 clip, it is also available as `python stream_arduino.py VIDEO.mp4 --audio-motion --loop`.
 
+The **Doom Fire** tab sends classic pixel flames to the LEDs and shows their
+live preview, music energy and flame height. Click **Start Doom Fire** in the
+live audio or video app. Calm passages produce low blue and purple flames,
+like Adaptive; energetic music supplies hotter fuel, taller red flames and
+restrained yellow highlights in the hottest regions, without white highlights.
+The bottom retains a blue/purple ember bed, with yellow patches during energetic
+passages. Intensity spans dim tips to bright cores within the firmware's RGB
+ceiling, keeping the flame contours visible on the LEDs.
+Cold flames use a lifted intensity curve and RGB565-aware channel levels so
+blue and purple remain visible after the controller's brightness mapping.
+Black stays black, silence extinguishes the embers, and the selected brightness
+ceiling still applies.
+The response combines loudness with recent passage energy and bass/mid/treble
+activity. Silence cools the embers to black.
+Wind follows the original algorithm: random 0–2 pixel shifts to the left use
+the same value for cooling. Cooling and rise rate scale from its 40 rows to
+the native 48×48 grid, retaining the original flame contours.
+**Brightness limit** and **Slowdown** share their settings with Audio palette;
+the fire blends gradually from blue/purple to red/orange with yellow accents
+over 10–90% passage energy. A separate color envelope eases the transition
+over several beats during gradual builds. Sudden low-to-high energy spikes
+respond on the next LED frame: a 320 ms logarithmic air pulse heats existing
+flame tongues, accelerates their rise, and sweeps blue/purple into red. The
+attack uses the newest 512 audio samples (10.7 ms at 48 kHz), with immediate
+band-energy analysis and a 12 ms attack envelope; release remains gradual.
+Live audio is sampled after frame pacing, immediately before USB output,
+avoiding a queued frame of stale audio. Batched propagation preserves the
+original wind and overwrite order while reducing per-frame Python work.
+Slowdown also slows gradual color transitions; sudden bursts still react
+immediately. The existing LED output limits remain active.
+**Return to audio visualizer** restores wave or spectrum without restarting.
+Switching from video releases its audio and USB connections and reuses the same
+browser tab. The board-free video preview shows the tab with launch disabled.
+You can also launch directly with `./start.sh --no-upload --style doom-fire`.
+Based on [Filipe Deschamps’ Doom Fire Algorithm](https://github.com/filipedeschamps/doom-fire-algorithm),
+with its [MIT license](docs/licenses/doom-fire-algorithm.txt).
+
+The **Doom** tab is a keyboard-playable game using the copied open-source
+Chocolate Doom engine and Freedoom Phase 2 levels/assets. Open
+`http://127.0.0.1:8765/#doom` and click **Play Doom**. W/S or Up/Down move,
+A/D strafe, Left/Right turn, Ctrl fires, Space opens doors, Shift runs,
+1–7 select weapons, and Enter/Esc control the menus. Click the game to focus.
+The engine runs locally in the browser and scales its complete image to fill the
+48×48 board at **30 FPS** through the existing live firmware. The square browser
+preview shows the same 48×48 image; Fullscreen fits it to the available screen.
+The game has no cropped edges or letterbox bars. Doom uses a separate 30 FPS
+stream while active, then restores the previous effect and its original rate.
+Brightness follows Audio palette and the existing firmware output limits.
+**Stop** releases the LEDs; **Play Doom** resumes the same browser game.
+Leaving the tab ends that game session and restores the previous LED effect.
+Lost browser connections release the display within two seconds.
+The game also works in the board-free preview. All runtime files, engine source,
+licenses, credits, and rebuild instructions are in [doom_game/](doom_game/README.md).
+No downloads are required at play time.
+
 YouTube support requires the Python dependencies above and a JavaScript runtime
 such as Node.js or Deno. See [yt-dlp's runtime setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 For an existing live-stream firmware installation, use `--no-upload` with
@@ -101,52 +156,130 @@ python video_app.py --youtube 'https://www.youtube.com/watch?v=pUWCnazcsbU'
 
 ## See it in motion
 
+The **projectM** tab runs the real projectM/MilkDrop engine with 9,795 presets,
+live Mac audio, preset search, previous/next, and automatic soft transitions.
+It renders at 192×192 and averages down to **48×48** for the LED panel, using
+the shared brightness/saturation controls and existing USB firmware.
+Build it once with `.venv/bin/python scripts/setup_projectm.py`, restart the
+app, and open `http://127.0.0.1:8765/#projectm`. You can also launch with
+`./start.sh --no-upload --style projectm`.
+See [projectM setup and upstream credits](projectm/README.md).
+
 <table>
   <tr>
     <td align="center" width="50%">
-      <a href="docs/assets/lava-lamp.mp4">
-        <img src="docs/assets/lava-lamp.gif" width="258" alt="16×16 lava-lamp simulation with glowing red and orange fluid rising and curling">
-      </a>
-      <br><strong>Lava lamp</strong>
-      <br>Heat, buoyancy, and fluid motion.
+      <a href="docs/assets/lava-lamp.mp4"><img src="docs/assets/lava-lamp.gif" width="290" alt="Red and orange fluid rising and curling on a 16 by 16 LED grid"></a>
+      <br><strong>Lava lamp · 16×16 artwork</strong>
+      <br>Seeded fluid simulation with heat and buoyancy.
       <br><a href="docs/assets/lava-lamp.mp4">Watch the MP4</a>
     </td>
     <td align="center" width="50%">
-      <a href="docs/assets/audio-spectrum.mp4">
-        <img src="docs/assets/audio-spectrum.gif" width="258" alt="16×16 rainbow spectrum with mirrored frequency bars reacting to recorded Mac system audio">
-      </a>
-      <br><strong>Live audio spectrum</strong>
-      <br>Rainbow frequency bars follow the music.
-      <br><a href="docs/assets/audio-spectrum.mp4">Watch with sound</a>
+      <a href="docs/assets/audio-wave.mp4"><img src="docs/assets/audio-wave.gif" width="290" alt="Native 48 by 48 audio waveform reacting to recorded music"></a>
+      <br><strong>Audio wave · 48×48</strong>
+      <br>Sunset waves follow the recorded music.
+      <br><a href="docs/assets/audio-wave.mp4">Watch the MP4</a>
     </td>
   </tr>
   <tr>
-    <td align="center" colspan="2">
-      <a href="docs/assets/audio-adaptive.mp4">
-        <img src="docs/assets/audio-adaptive.gif" width="258" alt="16×16 Adaptive spectrum changing color and brightness with the energy of live Mac system audio">
-      </a>
-      <br><strong>Adaptive audio spectrum</strong>
-      <br>Warm, vivid colors for energetic passages; softer Ocean colors for quieter sections.
-      <br><a href="docs/assets/audio-adaptive.mp4">Watch with sound</a>
+    <td align="center" width="50%">
+      <a href="docs/assets/audio-spectrum.mp4"><img src="docs/assets/audio-spectrum.gif" width="290" alt="Native 48 by 48 rainbow frequency spectrum reacting to recorded music"></a>
+      <br><strong>Audio spectrum · 48×48</strong>
+      <br>Rainbow bars track the frequency bands.
+      <br><a href="docs/assets/audio-spectrum.mp4">Watch the MP4</a>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/assets/audio-adaptive.mp4"><img src="docs/assets/audio-adaptive.gif" width="290" alt="Adaptive audio spectrum changing color with recorded music energy"></a>
+      <br><strong>Adaptive spectrum · 48×48</strong>
+      <br>Passage energy changes color and intensity.
+      <br><a href="docs/assets/audio-adaptive.mp4">Watch the MP4</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/assets/video-playback.mp4"><img src="docs/assets/video-playback.gif" width="290" alt="Lava source video decoded and converted to a 48 by 48 LED frame"></a>
+      <br><strong>Video playback / conversion · 48×48</strong>
+      <br>Original colors through the FFmpeg and RGB565 pipeline.
+      <br><a href="docs/assets/video-playback.mp4">Watch the MP4</a>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/assets/video-texture.mp4"><img src="docs/assets/video-texture.gif" width="290" alt="Audio reactive texture mapping applied to the same lava video"></a>
+      <br><strong>Video + audio texture · 48×48</strong>
+      <br>Live audio colors the video and adds circular waves.
+      <br><a href="docs/assets/video-texture.mp4">Watch the MP4</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/assets/video-slow-fast.mp4"><img src="docs/assets/video-slow-fast.gif" width="290" alt="Lava video tinted and accelerated by music passage energy"></a>
+      <br><strong>Slow → fast · 48×48</strong>
+      <br>Music controls tint, saturation, and 0.8×–1.5× speed.
+      <br><a href="docs/assets/video-slow-fast.mp4">Watch the MP4</a>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/assets/video-preloaded.mp4"><img src="docs/assets/video-preloaded.gif" width="290" alt="48 by 48 buffered video using the default brightness and smoothing"></a>
+      <br><strong>Preloaded video · 48×48</strong>
+      <br>Separate firmware; buffered RGB565 with temporal smoothing.
+      <br><a href="docs/assets/video-preloaded.mp4">Watch the MP4</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/assets/doom-fire.mp4"><img src="docs/assets/doom-fire.gif" width="290" alt="Music reactive Doom Fire with cool embers and hot flame tongues"></a>
+      <br><strong>Doom Fire · 48×48</strong>
+      <br>Audio heats blue/purple embers into taller red flames.
+      <br><a href="docs/assets/doom-fire.mp4">Watch the MP4</a>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/assets/doom-game.mp4"><img src="docs/assets/doom-game.gif" width="290" alt="Keyboard gameplay captured from the bundled Doom engine at 48 by 48"></a>
+      <br><strong>Doom · 48×48</strong>
+      <br>Real Chocolate Doom engine with Freedoom Phase 2.
+      <br><a href="docs/assets/doom-game.mp4">Watch the MP4</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/assets/projectm.mp4"><img src="docs/assets/projectm.gif" width="290" alt="Music driven MilkDrop preset rendered by the native projectM engine"></a>
+      <br><strong>projectM / MilkDrop · 48×48</strong>
+      <br>Native projectM engine; one of 9,795 presets.
+      <br><a href="docs/assets/projectm.mp4">Watch the MP4</a>
     </td>
   </tr>
 </table>
 
-The audio previews use real Mac system audio recorded during playback.
-Adaptive captures the running visualizer's live frames at 60% brightness and
-20% slowdown. Both audio MP4s include the recorded sound; the inline GIFs are
-silent. The lava is a seeded fluid simulation.
-[Record or rebuild the previews](docs/development.md#readme-previews).
+Every animation is an eight-second software preview from the actual renderer.
+Audio-reactive examples reuse the recorded Mac system audio; their MP4s include
+the recording and the inline GIFs are silent. They use 60% brightness and 20%
+slowdown. Video examples use the same generated lava clip, so its original
+colors, audio texture, energy-driven playback, and buffered output can be compared.
+Local files and YouTube downloads share the video pipeline shown here. Video
+conversion exports that same grid; it does not add another display effect.
+Preloaded video uses its default 25% intensity and 180 ms smoothing at 48×48.
+Lava retains its original 16×16 artwork, scaled by the live receiver.
+The other effects render at 48×48; frames are quantized through RGB565 except
+for the original lava artwork and Doom's browser canvas capture. The physical
+panel also applies its firmware brightness and power limits.
+The projectM example uses **cope + flexi – colorful marble (ghost mix)**.
+[Rebuild all previews](docs/development.md#readme-previews).
 
 ## What you can run
 
-| Mode | Input | Command after setup |
+Commands assume setup is complete and, for `--no-upload`, the matching firmware
+is already installed. The browser controls are at `http://127.0.0.1:8765/`.
+
+| Mode | Input | Launch or browser control |
 | :-- | :-- | :-- |
 | Lava lamp | Procedural fluid simulation | `python3 lava_lamp_stream.py --clear-on-exit` |
-| Audio wave | macOS system audio | `python3 system_audio_visualizer.py --style wave --clear-on-exit` |
-| Audio spectrum | macOS system audio | `python3 system_audio_visualizer.py --style spectrum --clear-on-exit` |
-| Video stream | Local video decoded with FFmpeg | `python3 stream_arduino.py video_clips/my_video.mp4 --loop --clear-on-exit` |
-| Video conversion | Local video | `python3 led_animator.py video_clips/my_video.mp4 -o output/my_animation` |
+| Audio wave | macOS system audio | `./start.sh --no-upload --style wave` |
+| Audio spectrum | macOS system audio | `./start.sh --no-upload --style spectrum` |
+| Adaptive spectrum | macOS system audio | Start spectrum; choose **Adaptive** in **Audio palette** |
+| Video stream / YouTube | Local video or downloaded MP4 | `python3 stream_arduino.py VIDEO.mp4 --loop --no-audio-reactive`; **Vídeo** also accepts YouTube links |
+| Video + audio texture | Video and macOS system audio | `python3 stream_arduino.py VIDEO.mp4 --loop`; enable texture mapping in **Vídeo** |
+| Slow → fast | Video and macOS system audio | `python3 stream_arduino.py VIDEO.mp4 --audio-motion --loop` |
+| Preloaded video · 48×48 | Local clip buffered in PSRAM | `python3 main.py video VIDEO.mp4 --seconds 10` (installs separate firmware) |
+| Doom Fire | macOS system audio | `./start.sh --no-upload --style doom-fire` |
+| Doom | Keyboard-playable bundled game | Open **Doom** and click **Play Doom** in the running app |
+| projectM / MilkDrop | Presets and macOS system audio | Build with `python3 scripts/setup_projectm.py`, then `./start.sh --no-upload --style projectm` |
+| Video conversion | Local video, no board needed | `python3 led_animator_48.py VIDEO.mp4 -o output/my_animation` |
 
 ## Quick start
 
@@ -162,7 +295,7 @@ python3 -m pip install -r requirements.txt
 ```
 
 For physical playback, follow the [wiring and firmware setup](docs/hardware.md)
-for an ESP32-S3 and four 16×16 WS2812B panels with external 5 V power and
+for an ESP32-S3 and nine 16×16 WS2812B panels with external 5 V power and
 common ground. Connect the controller's existing USB port. After installing
 the firmware prerequisites, upload and start the audio wave:
 
@@ -190,6 +323,9 @@ No panel is needed to [convert videos](docs/video-conversion.md) or
 - [32×32 mode preview](docs/32x32-preview.md): native spectrum rendering and panel mapping.
 - [Live streaming](docs/live-streaming.md): lava, wave, spectrum, video, and troubleshooting.
 - [Video conversion](docs/video-conversion.md): 16×16 and 48×48 workflows, Docker, data formats, Arduino export.
+- [Doom game](doom_game/README.md): keyboard controls, bundled assets, source, and licenses.
+- [projectM](projectm/README.md): native engine setup, presets, favorites, and credits.
+- [Mac fan control](docs/mac-fans.md): optional native fan controls while the app runs.
 - [Development](docs/development.md): tests, project structure, and preview generation.
 
 Only the small documentation previews are versioned. Source videos, exported

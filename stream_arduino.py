@@ -46,8 +46,6 @@ SERIAL_BAUD = 1_500_000
 DEFAULT_STREAM_FPS = 12.0
 STREAM_COMPRESSION_LEVEL = 1
 DEFAULT_PORT_WAIT = 30.0
-VIDEO_FIRMWARE_OUTPUT_SCALE = 60
-MAX_VIDEO_PIXEL_PWM_TOTAL = 4
 
 # Common USB serial names on macOS, Linux, and boards using WCH or Silicon Labs
 # USB-to-UART chips. Restricting automatic selection to these names prevents a
@@ -166,16 +164,20 @@ def exchange_packet(
     expected_status: int,
     timeout: float,
     retries: int,
-) -> None:
+    *, drain: bool = True, already_sent: bool = False, allow_ack_ahead: bool = False,
+) -> int | None:
     packet = build_packet(packet_type, sequence, payload)
     last_error: Exception | None = None
     for _attempt in range(retries + 1):
-        connection.write(packet)
-        connection.flush()
+        if not already_sent or _attempt:
+            connection.write(packet)
+            if drain:
+                connection.flush()
         try:
             while True:
                 response = read_response(connection, timeout)
-                if response.sequence != (sequence & 0xFFFFFFFF):
+                if (response.sequence != (sequence & 0xFFFFFFFF)
+                    and not (allow_ack_ahead and response.sequence > sequence)):
                     continue
                 if response.status == STATUS_NAK:
                     raise RuntimeError(
@@ -186,7 +188,7 @@ def exchange_packet(
                     raise RuntimeError(
                         f"unexpected controller status {response.status}"
                     )
-                return
+                return response.sequence if allow_ack_ahead else None
         except (TimeoutError, RuntimeError) as exc:
             last_error = exc
             print(f"Serial retry for packet {sequence}: {exc}", file=sys.stderr, flush=True)
@@ -358,57 +360,18 @@ def probe_video_duration(path: Path) -> float:
 
 
 def limit_video_flash(frame: np.ndarray) -> np.ndarray:
-    """Bound each LED's total light and strongest channel before RGB565."""
-    values = frame.astype(np.float32)
-    red, green, blue = values[..., 0], values[..., 1], values[..., 2]
-    total = (red + green + blue)[..., None]
-    threshold = np.maximum(np.maximum(red, green), blue) * 0.45
-    strong_channels = ((red >= threshold).astype(np.uint8)
-                       + (green >= threshold) + (blue >= threshold))[..., None]
-    # Cyan/magenta/yellow stage lights can be as dazzling as white even
-    # though their third channel is dark. Give those pixels their own cap.
-    # RGB565 needs a little more input for neutral pixels to reach the same
-    # visible PWM step as colored pixels; their final PWM is still capped.
-    limit = np.where(strong_channels == 3, 36.0,
-                     np.where(strong_channels == 2, 24.0, 32.0))
-    values *= np.minimum(1.0, limit / np.maximum(total, 1.0))
-    np.minimum(values, 20.0, out=values)
-    return np.rint(values).clip(0, 255).astype(np.uint8)
+    """Retain channel precision for the firmware's fractional PWM limiter.
 
-
-@lru_cache(maxsize=1)
-def _rgb565_pwm_totals() -> np.ndarray:
-    packed = np.arange(65536, dtype=np.uint32)
-    red5, green6, blue5 = (packed >> 11) & 31, (packed >> 5) & 63, packed & 31
-    red = (red5 << 3) | (red5 >> 2)
-    green = (green6 << 2) | (green6 >> 4)
-    blue = (blue5 << 3) | (blue5 >> 2)
-    totals = ((red * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
-              + (green * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)
-              + (blue * VIDEO_FIRMWARE_OUTPUT_SCALE // 255)).astype(np.uint8)
-    totals.flags.writeable = False
-    return totals
+    The old per-pixel clipping flattened bright grays, then RGB565 quantized
+    the remaining 0..20 input range into only a few steps. Output power now
+    scales in firmware; scene-wide flash easing remains in VideoFlashLimiter.
+    """
+    return np.rint(frame).clip(0, 255).astype(np.uint8)
 
 
 def encode_limited_video_rgb565(frame: np.ndarray) -> bytes:
-    """Cap the PWM bytes the live firmware will actually transmit.
-
-    RGB565 rounds small values in uneven steps. A limit applied only before
-    encoding can therefore still leave a few harsh cyan or white pixels.
-    """
-    values = frame.copy()
-    totals = _rgb565_pwm_totals()
-    for _ in range(32):
-        payload = encode_rgb565(values)
-        packed = np.frombuffer(payload, dtype="<u2").reshape(values.shape[:2])
-        pwm_total = totals[packed]
-        too_bright = pwm_total > MAX_VIDEO_PIXEL_PWM_TOTAL
-        if not np.any(too_bright):
-            return payload
-        scale = (MAX_VIDEO_PIXEL_PWM_TOTAL /
-                 pwm_total[too_bright].astype(np.float32))[:, None]
-        values[too_bright] = np.floor(values[too_bright] * scale).astype(np.uint8)
-    raise RuntimeError("video pixel PWM limit did not converge")
+    """Use the full wire range; firmware enforces the video PWM ceiling."""
+    return encode_rgb565(frame)
 
 
 @lru_cache(maxsize=1)
@@ -437,8 +400,10 @@ class VideoFlashLimiter:
 
     def __init__(self, fps: float):
         self.allowed_mean = 0.0
-        self.max_rise = 12.0 / fps
-        self.max_scene_mean = 8.0
+        self.max_rise = 255.0 / fps
+        # 20% more scene headroom, matching the increased firmware allowance.
+        # Keep pixels in the full 0..255 wire range; output gain lives on board.
+        self.max_scene_mean = 204.0
         self.previous_frame: np.ndarray | None = None
         self.steady_frames = 0
 
@@ -452,7 +417,7 @@ class VideoFlashLimiter:
         mean = float(limited.mean())
         # A stable title card can be brighter without allowing short stage
         # light bursts to grow into sustained full-panel flashes.
-        scene_ceiling = 12.0 if self.steady_frames >= 8 else self.max_scene_mean
+        scene_ceiling = 255.0 if self.steady_frames >= 8 else self.max_scene_mean
         self.allowed_mean = min(mean, scene_ceiling,
                                 self.allowed_mean + self.max_rise)
         if mean > self.allowed_mean and mean > 0:
@@ -612,6 +577,7 @@ def stream_frames(
     board_controls: BoardResetControls | None = None,
     video_mode: bool = False,
     should_stop: Callable[[], bool] | None = None,
+    palette_controls: PaletteControls | None = None,
 ) -> tuple[int, int]:
     if drop_late and rebase_late:
         raise ValueError("drop_late and rebase_late cannot both be enabled")
@@ -624,6 +590,7 @@ def stream_frames(
     stats_sent = 0
     pass_start_seconds = start_seconds
     last_raw_frame: bytes | None = None
+    output_fps, output_video_mode = source.fps, video_mode
 
     def check_board_reset(*, adjust_clock: bool = True) -> bool:
         nonlocal pass_start
@@ -631,8 +598,8 @@ def stream_frames(
             return False
         started = time.monotonic()
         processed = board_controls.process(lambda: reset_board(
-            connection, source.fps, timeout, retries, display_size,
-            video_mode=video_mode,
+            connection, output_fps, timeout, retries, display_size,
+            video_mode=output_video_mode,
         ))
         if processed and adjust_clock and pass_start is not None:
             # Exclude reboot time from playback so the video never skips ahead.
@@ -641,21 +608,106 @@ def stream_frames(
 
     def send_output(raw: bytes) -> None:
         nonlocal sent, timeline_index
-        source_payload = source.prepare_frame(raw) if source.prepare_frame else raw
-        payload = resize_rgb565(source_payload, source.size, display_size)
-        compressed = zlib.compress(payload, STREAM_COMPRESSION_LEVEL) if compress else payload
+        doom_frame = None
+        if palette_controls is not None:
+            doom_frame = palette_controls.doom.frame(palette_controls.settings_snapshot()[1]["brightness"])
+        if doom_frame is not None:
+            source_payload = encode_rgb565(doom_frame)
+            payload = resize_rgb565(source_payload, palette_controls.size, display_size)
+        else:
+            source_payload = source.prepare_frame(raw) if source.prepare_frame else raw
+            payload = resize_rgb565(source_payload, source.size, display_size)
+        compression_level = 6 if doom_frame is not None else STREAM_COMPRESSION_LEVEL
+        compressed = zlib.compress(payload, compression_level) if compress or doom_frame is not None else payload
         packet_type = (PACKET_COMPRESSED_FRAME
                        if len(compressed) < len(payload) else PACKET_FRAME)
-        exchange_packet(
-            connection, packet_type, timeline_index + 1,
-            compressed if packet_type == PACKET_COMPRESSED_FRAME else payload,
-            STATUS_ACK, timeout, retries,
-        )
-        if source.on_frame_sent is not None:
+        arguments = (connection, packet_type, timeline_index + 1,
+                     compressed if packet_type == PACKET_COMPRESSED_FRAME else payload,
+                     STATUS_ACK, timeout, retries)
+        # The ACK already confirms CRC-checked receipt. An additional macOS
+        # serial drain can consume the 33 ms budget even for a small frame.
+        exchange_packet(*arguments, drain=False)
+        if doom_frame is not None:
+            palette_controls.doom.acknowledge_frame()
+            palette_controls.publish_frame(decode_rgb565_frame(source_payload, palette_controls.size))
+        elif source.on_frame_sent is not None:
             # Publish only frames actually acknowledged by the board.
             source.on_frame_sent(source_payload)
         sent += 1
         timeline_index += 1
+
+    def stream_doom(raw: bytes, *, adjust_clock: bool = True) -> None:
+        """Pause the source timeline while the game owns a steady 30 FPS stream."""
+        nonlocal pass_start, output_fps, output_video_mode, timeline_index, sent
+        if palette_controls is None or palette_controls.doom.frame(1) is None:
+            return
+        started = time.monotonic()
+        output_fps, output_video_mode = palette_controls.doom.FPS, True
+        handshake(connection, output_fps, timeout, retries, display_size, video_mode=True)
+        deadline = time.monotonic()
+        pending = []
+        acknowledged_through = timeline_index
+
+        def acknowledge_oldest() -> None:
+            nonlocal sent, acknowledged_through
+            packet_type, sequence, wire_payload, source_payload = pending.pop(0)
+            if sequence > acknowledged_through:
+                try:
+                    # The firmware processes packets in order. A newer ACK also
+                    # confirms progress past an older ACK lost over USB.
+                    acknowledged = exchange_packet(connection, packet_type, sequence, wire_payload,
+                        STATUS_ACK, timeout, 0, drain=False, already_sent=True, allow_ack_ahead=True)
+                    acknowledged = sequence if acknowledged is None else acknowledged
+                    if not sequence <= acknowledged <= timeline_index:
+                        raise RuntimeError("unexpected Doom acknowledgement sequence")
+                    acknowledged_through = acknowledged
+                except RuntimeError:
+                    # Retry only the newest frame; retransmitting an old queued
+                    # frame could briefly roll the display backward.
+                    latest = pending[-1] if pending else (packet_type, sequence, wire_payload, source_payload)
+                    exchange_packet(connection, latest[0], latest[1], latest[2], STATUS_ACK,
+                                    timeout, retries, drain=False)
+                    acknowledged_through = latest[1]
+            palette_controls.doom.acknowledge_frame()
+            palette_controls.publish_frame(decode_rgb565_frame(source_payload, palette_controls.size))
+            sent += 1
+
+        try:
+            while palette_controls.doom.frame(1) is not None:
+                if should_stop is not None and should_stop():
+                    break
+                if board_controls is not None and board_controls.state()["status"] == "pending":
+                    while pending:
+                        acknowledge_oldest()
+                check_board_reset(adjust_clock=False)
+                now = time.monotonic()
+                if now < deadline:
+                    time.sleep(deadline - now)
+                frame = palette_controls.doom.frame(palette_controls.settings_snapshot()[1]["brightness"])
+                if frame is None:
+                    break
+                source_payload = encode_rgb565(frame)
+                payload = resize_rgb565(source_payload, palette_controls.size, display_size)
+                compressed = zlib.compress(payload, 6)
+                packet_type = PACKET_COMPRESSED_FRAME if len(compressed) < len(payload) else PACKET_FRAME
+                wire_payload = compressed if packet_type == PACKET_COMPRESSED_FRAME else payload
+                timeline_index += 1
+                connection.write(build_packet(packet_type, timeline_index, wire_payload))
+                pending.append((packet_type, timeline_index, wire_payload, source_payload))
+                # Overlap the next USB upload with the previous frame's ACK.
+                # Two packets fit in the firmware's existing receive buffer.
+                if len(pending) == 2:
+                    acknowledge_oldest()
+                deadline += 1 / output_fps
+                if time.monotonic() - deadline > 1 / output_fps:
+                    deadline = time.monotonic()
+        finally:
+            while pending:
+                acknowledge_oldest()
+            output_fps, output_video_mode = source.fps, video_mode
+            handshake(connection, output_fps, timeout, retries, display_size, video_mode=video_mode)
+            if adjust_clock and pass_start is not None:
+                pass_start += time.monotonic() - started
 
     def check_video_controls() -> float | None:
         nonlocal pass_start
@@ -667,6 +719,7 @@ def stream_frames(
                 return None
             if paused_at is None:
                 paused_at = time.monotonic()
+            stream_doom(last_raw_frame or b"", adjust_clock=False)
             reset_processed = check_board_reset(adjust_clock=False)
             seek = controls.take_seek()
             if seek is not None:
@@ -699,6 +752,7 @@ def stream_frames(
                 if should_stop is not None and should_stop():
                     break
                 check_board_reset()
+                stream_doom(payload)
                 if last_raw_frame is None and source.prepare_frame is not None:
                     last_raw_frame = payload
                 seek_to = check_video_controls()
@@ -874,6 +928,8 @@ def main(argv: list[str] | None = None) -> int:
     switch_requested = threading.Event()
     requested_video: Path | None = None
     requested_motion = False
+    requested_fire = False
+    requested_projectm = False
     reset_reload = False
 
     def reload_after_reset() -> None:
@@ -890,6 +946,16 @@ def main(argv: list[str] | None = None) -> int:
     def start_motion(path: Path) -> None:
         nonlocal requested_video, requested_motion
         requested_video, requested_motion = path, True
+        switch_requested.set()
+
+    def start_fire() -> None:
+        nonlocal requested_fire
+        requested_fire = True
+        switch_requested.set()
+
+    def start_projectm() -> None:
+        nonlocal requested_projectm
+        requested_projectm = True
         switch_requested.set()
 
     try:
@@ -957,6 +1023,8 @@ def main(argv: list[str] | None = None) -> int:
                                        board_controls=board_controls,
                                        on_reset=lambda: board_controls.request(on_complete=reload_after_reset),
                                        on_video_start=start_video,
+                                       on_fire_start=start_fire,
+                                       on_projectm_start=start_projectm,
                                        on_motion_start=start_motion if capture is not None else None)
         control_server.start()
         controls_tab = "motion" if args.audio_motion else "video"
@@ -983,9 +1051,10 @@ def main(argv: list[str] | None = None) -> int:
             board_controls=board_controls,
             video_mode=args.display_size == 48 and not args.no_flash_limit,
             should_stop=switch_requested.is_set,
+            palette_controls=palette_controls,
         )
         print(f"Finished: {sent} sent, {dropped} dropped.", file=sys.stderr)
-        if requested_video is None and not reset_reload:
+        if requested_video is None and not reset_reload and not requested_fire and not requested_projectm:
             return 0
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
@@ -1015,6 +1084,22 @@ def main(argv: list[str] | None = None) -> int:
             capture.close()
 
     # Release the HTTP, audio and serial resources before opening the next MP4.
+    if requested_fire or requested_projectm:
+        save_reload_state(palette_controls.settings_snapshot()[1])
+        fire_args = [
+            sys.executable, str(Path(__file__).with_name("system_audio_visualizer.py").resolve()),
+            "--style", "projectm" if requested_projectm else "doom-fire", "--port", port, "--baud", str(args.baud),
+            "--display-size", str(args.display_size), "--controls-port", str(control_server.port),
+            "--timeout", str(args.timeout), "--retries", str(args.retries), "--no-browser",
+        ]
+        if args.clear_on_exit:
+            fire_args.append("--clear-on-exit")
+        try:
+            os.execv(sys.executable, fire_args)
+        except OSError as exc:
+            print(f"error: could not start audio visualizer: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if reset_reload:
         args.port = port
         video_state = controls.state()

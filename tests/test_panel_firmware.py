@@ -17,6 +17,8 @@ FASTLED_STUB = r"""
 #include <cstring>
 #include <vector>
 
+using std::min;
+using std::max;
 constexpr int WS2812B = 0, GRB = 0;
 struct CRGB {
   uint8_t r, g, b;
@@ -105,7 +107,10 @@ struct FakeSerial {
   }
 } Serial0;
 FakeSerial Serial;  // A different endpoint: tests must exercise UART0.
-void delay(int) {}
+uint32_t fakeMicros = 0;
+uint32_t micros() { return fakeMicros; }
+uint32_t millis() { return fakeMicros / 1000; }
+void delay(int ms) { fakeMicros += ms * 1000; }
 """
 
 HARNESS = r"""
@@ -168,7 +173,51 @@ int main() {
     CRGB decoded = decodeRgb565(value), limited = limitPixelBrightness(decoded);
     assert(int(limited.r) + limited.g + limited.b <= MAX_TRANSMITTED_RGB_TOTAL);
     assert(limited.r <= decoded.r && limited.g <= decoded.g && limited.b <= decoded.b);
+    // Exhaust every phase and wire color: average equals the fractional target,
+    // including colored shadows, while every individual refresh obeys the cap.
+    for (bool video : {false, true}) {
+      const PixelPwm target = pixelPwm(decoded, video);
+      assert(target.r + target.g + target.b <= (video ? VIDEO_PIXEL_PWM_Q8 : MAX_TRANSMITTED_RGB_TOTAL * 256));
+      uint32_t sumR=0, sumG=0, sumB=0;
+      for (int phase=0; phase<256; ++phase) {
+        const CRGB output = quantizePwm(target, phase);
+        const bool neutral = target.r == target.g && target.g == target.b;
+        assert(int(output.r)+output.g+output.b <= (video ? (neutral ? MAX_VIDEO_NEUTRAL_RGB_TOTAL : MAX_VIDEO_RGB_TOTAL) : MAX_TRANSMITTED_RGB_TOTAL));
+        sumR += output.r; sumG += output.g; sumB += output.b;
+      }
+      assert(sumR == target.r && sumG == target.g && sumB == target.b);
+    }
   }
+  // Neutral grays stay neutral on EVERY refresh, not just on average.
+  for (bool video : {false, true}) for (int gray=0; gray<256; ++gray) {
+    const uint16_t wire = ((gray>>3)<<11) | ((gray>>2)<<5) | (gray>>3);
+    const PixelPwm target = pixelPwm(decodeRgb565(wire), video);
+    // The wire green channel can differ by up to four counts.
+    if (abs(int(decodeRgb565(wire).g) - decodeRgb565(wire).r) <= 4) {
+      for (int phase=0; phase<256; ++phase) {
+        const CRGB output = quantizePwm(target, phase);
+        assert(output.r == output.g && output.g == output.b);
+      }
+    }
+  }
+  // All 256 source grays remain strictly ordered before wire quantization.
+  for (bool video : {false, true}) {
+    uint32_t previous = 0;
+    for (int gray=1; gray<256; ++gray) {
+      const PixelPwm target = pixelPwm(CRGB(gray,gray,gray), video);
+      const uint32_t total = target.r + target.g + target.b;
+      assert(total > previous);
+      previous = total;
+    }
+  }
+  // Maximum normal output is exactly 20% higher. Video keeps fractional
+  // headroom, including neutral grays, instead of truncating the increase.
+  assert(OUTPUT_SCALE == 72 && MAX_TRANSMITTED_RGB_TOTAL == 18);
+  assert(MAX_POWER_MILLIAMPS == 4800);
+  const PixelPwm videoNeutral = pixelPwm(CRGB::White, true);
+  assert(videoNeutral.r == 256 * 6 / 5 && videoNeutral.g == videoNeutral.r && videoNeutral.b == videoNeutral.r);
+  const PixelPwm videoRed = pixelPwm(CRGB::Red, true);
+  assert(videoRed.r == 4 * 256 * 6 / 5 && videoRed.g == 0 && videoRed.b == 0);
   setup();
   assert(Serial0.rxSize >= 2*(4608+16));
   assert(FastLED.lanes.size() == 9);
@@ -190,17 +239,17 @@ int main() {
   request(PACKET_HELLO, 0, {48,48,1,0,0,0,0,0});
   response(STATUS_READY, 0, 0);
 
-  // Different colors across a panel boundary; the transfer must finish before ACK.
+  // Different colors across a panel boundary; ACK permits reception during output.
   writeU16(frame.data()+15*2, 0xf800);
   writeU16(frame.data()+16*2, 0x07e0);
   writeU16(frame.data()+(16*48)*2, 0x001f);
   writeU16(frame.data()+(16*48+16)*2, 0xffff);
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
-  assert(!FastLED.inFlight);
-  assert(leds[255].r == 15 && leds[256].g == 15);
-  assert(leds[768].b == 15);
-  assert(leds[1024].r == 4 && leds[1024].g == 4 && leds[1024].b == 4);
+  assert(FastLED.inFlight);
+  assert(leds[255].r == 18 && leds[256].g == 18);
+  assert(leds[768].b == 18);
+  assert(leds[1024].r == 6 && leds[1024].g == 6 && leds[1024].b == 6);
   const int shows = FastLED.shows;
   request(PACKET_FRAME, 1, frame);
   response(STATUS_ACK, 0, 1);
@@ -210,14 +259,14 @@ int main() {
   response(STATUS_NAK, ERROR_BAD_CRC, 2);
   request(PACKET_FRAME, 2, frame, false, true);
   response(STATUS_NAK, ERROR_BAD_LENGTH, 2);
-  assert(FastLED.shows == shows);
+  assert(lastFrameSequence == 1);  // No bad frame replaces the displayed image.
 
   Serial0.receivedDuringDMA = false;
   writeU16(frame.data()+15*2, 0x001f);
   request(PACKET_FRAME, 2, frame);
   response(STATUS_ACK, 0, 2);
-  assert(!Serial0.receivedDuringDMA && !FastLED.inFlight);
-  assert(leds[255].b == 15 && leds[255].r == 0);
+  assert(FastLED.inFlight && Serial0.receivedDuringDMA);
+  assert(leds[255].b == 18 && leds[255].r == 0);
 
   request(PACKET_CLEAR, 99, {});
   response(STATUS_ACK, 0, 99);
@@ -225,13 +274,13 @@ int main() {
   for (auto &led : leds) assert(led.r == 0 && led.g == 0 && led.b == 0);
   request(PACKET_FRAME, 2, frame);  // Same sequence can redraw after CLEAR.
   response(STATUS_ACK, 0, 2);
-  assert(!FastLED.inFlight && leds[255].b == 15);
+  assert(FastLED.inFlight && leds[255].b == 18);
   // A full-white packet cannot bypass limits, even if global settings changed.
   FastLED.setBrightness(255);
   FastLED.setDither(1);
   request(PACKET_FRAME, 3, std::vector<uint8_t>(4608, 255));
   response(STATUS_ACK, 0, 3);
-  for (const auto &color : leds) assert(color.r == 4 && color.g == 4 && color.b == 4);
+  for (const auto &color : leds) assert(color.r == 6 && color.g == 6 && color.b == 6);
   std::vector<uint8_t> compressed(compressBound(frame.size()));
   uLongf compressedLength = compressed.size();
   assert(compress2(compressed.data(), &compressedLength, frame.data(),
@@ -239,7 +288,7 @@ int main() {
   compressed.resize(compressedLength);
   request(PACKET_COMPRESSED_FRAME, 4, compressed);
   response(STATUS_ACK, 0, 4);
-  assert(leds[255].b == 15 && leds[255].r == 0);
+  assert(leds[255].b == 18 && leds[255].r == 0);
   compressed.pop_back();
   request(PACKET_COMPRESSED_FRAME, 5, compressed);
   response(STATUS_NAK, ERROR_BAD_LENGTH, 5);
@@ -255,17 +304,45 @@ int main() {
   response(STATUS_ACK, 0, 6);
   assert(FastLED.inFlight);
   for (const auto &color : leds)
-    assert(int(color.r) + color.g + color.b <= MAX_VIDEO_RGB_TOTAL);
+    assert(int(color.r) + color.g + color.b <= MAX_VIDEO_NEUTRAL_RGB_TOTAL);
   Serial0.receivedDuringDMA = false;
   request(PACKET_FRAME, 7, videoWhite);
   response(STATUS_ACK, 0, 7);
   assert(Serial0.receivedDuringDMA && FastLED.inFlight);
   for (const auto &color : leds)
-    assert(int(color.r) + color.g + color.b <= MAX_VIDEO_RGB_TOTAL);
+    assert(int(color.r) + color.g + color.b <= MAX_VIDEO_NEUTRAL_RGB_TOTAL);
   // Receiving during LED output must never change its in-flight pixel buffer.
   request(PACKET_FRAME, 8, std::vector<uint8_t>(4608, 0));
   response(STATUS_ACK, 0, 8);
   assert(FastLED.inFlight);
+  for (const auto &color : leds) assert(color.r == 0 && color.g == 0 && color.b == 0);
+  // A held dim image must produce exactly the same bytes on every frame,
+  // including after long idle gaps. Changing temporal thresholds caused the
+  // low-frequency on/off blinking this regression guards against.
+  std::vector<uint8_t> dimGray(4608);
+  for (int index=0; index<2304; ++index) writeU16(dimGray.data()+index*2, 0x8410);
+  request(PACKET_FRAME, 20, dimGray);
+  response(STATUS_ACK, 0, 20);
+  FastLED.wait();
+  const std::vector<CRGB> held(leds, leds+NUM_LEDS);
+  for (int sequence=21; sequence<31; ++sequence) {
+    fakeMicros += sequence * 17000;
+    request(PACKET_FRAME, sequence, dimGray);
+    response(STATUS_ACK, 0, sequence);
+    FastLED.wait();
+    assert(memcmp(leds, held.data(), NUM_LEDS*sizeof(CRGB)) == 0);
+  }
+  const int beforeIdle = FastLED.shows;
+  fakeMicros += 1000000;
+  loop();
+  assert(FastLED.shows == beforeIdle);
+  assert(memcmp(leds, held.data(), NUM_LEDS*sizeof(CRGB)) == 0);
+  request(PACKET_CLEAR, 100, {});
+  response(STATUS_ACK, 0, 100);
+  const int afterClear = FastLED.shows;
+  fakeMicros += 1000000;
+  loop();
+  assert(FastLED.shows == afterClear);
   for (const auto &color : leds) assert(color.r == 0 && color.g == 0 && color.b == 0);
   showMatrixCoverageTest();  // The startup diagnostic uses the same limiter.
   FastLED.wait();

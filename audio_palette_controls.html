@@ -110,6 +110,7 @@
       }
       .tabs {
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
         margin-bottom: 24px;
       }
@@ -366,6 +367,46 @@
         margin: 0;
         min-width: 0;
       }
+      #projectm-controls {
+        display: grid;
+        gap: 10px;
+        margin-top: 20px;
+        font-size: 13px;
+      }
+      #projectm-controls input[type="search"],
+      #projectm-controls select {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+      }
+      #projectm-search {
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #24242d;
+        color: inherit;
+      }
+      #projectm-controls .row {
+        margin-top: 0;
+        justify-content: flex-start;
+      }
+      #projectm-controls .note {
+        margin-top: 0;
+      }
+      #projectm-now {
+        overflow-wrap: anywhere;
+      }
+      #projectm-favorites {
+        display: grid;
+        gap: 8px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+      #projectm-favorites button {
+        text-align: left;
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
       @media (max-width: 700px) {
         main {
           padding: 26px 16px;
@@ -422,6 +463,9 @@
         <button id="audio-tab" type="button" role="tab" aria-controls="audio-panel" aria-selected="true">Audio palette</button>
         <button id="video-tab" type="button" role="tab" aria-controls="video-panel" aria-selected="false">Vídeo</button>
         <button id="motion-tab" type="button" role="tab" aria-controls="motion-panel" aria-selected="false">Slow → fast</button>
+        <button id="fire-tab" type="button" role="tab" aria-controls="fire-panel" aria-selected="false">Doom Fire</button>
+        <button id="doom-tab" type="button" role="tab" aria-controls="doom-panel" aria-selected="false">Doom</button>
+        <button id="projectm-tab" type="button" role="tab" aria-controls="projectm-panel" aria-selected="false">projectM</button>
       </nav>
       <section id="audio-panel" role="tabpanel" aria-labelledby="audio-tab">
       <div class="layout">
@@ -616,6 +660,85 @@
           </div>
         </div>
       </section>
+      <section id="fire-panel" role="tabpanel" aria-labelledby="fire-tab" hidden>
+        <div class="card video-card">
+          <div class="eyebrow">Music-driven flames</div>
+          <h2>Doom Fire</h2>
+          <p>Deep blue and purple flames for calm passages, like Adaptive. Gradual builds warm into red and orange; sudden energy spikes pump a small explosion upward, sweeping rapidly into red with yellow accents. The bottom keeps a blue/purple ember bed, with yellow patches during energetic passages. The original leftward wind carries defined flame tips. Silence lets the embers fade.</p>
+          <div class="row">
+            <button id="fire-start" type="button" disabled>▶ Start Doom Fire</button>
+            <button id="fire-stop" type="button" hidden>Return to audio visualizer</button>
+          </div>
+          <p id="fire-status" class="note" role="status">Connecting to the LED app…</p>
+          <fieldset id="fire-controls" disabled>
+            <label class="range-label" for="fire-brightness">Brightness limit <output id="fire-brightness-value">6.3%</output></label>
+            <input id="fire-brightness" type="range" min="0" max="100" step="0.1" value="6.3" />
+            <label class="range-label" for="fire-slowdown">Slowdown <output id="fire-slowdown-value">20%</output></label>
+            <input id="fire-slowdown" type="range" min="0" max="95" step="1" value="20" />
+          </fieldset>
+          <div id="fire-live" hidden>
+            <label class="range-label" for="fire-energy">Music energy <output id="fire-energy-value">0%</output></label>
+            <meter id="fire-energy" min="0" max="1" value="0" style="width:100%;height:16px">0%</meter>
+            <p class="note">Flame height <span id="fire-height">0%</span> · Live LED output</p>
+            <canvas id="fire-preview" class="video-led-preview" width="384" height="384"
+              role="img" aria-label="Live Doom fire sent to the LEDs"></canvas>
+          </div>
+          <p class="note">Brightness and Slowdown are shared with Audio palette. Slowdown makes gradual color transitions slower; sudden energy spikes still burst immediately. Blue and purple are lifted to stay visible on the LEDs; dark tips still contrast with brighter red and yellow heat. The palette has no white highlights. Saturation is adjustable in Audio palette.</p>
+          <p class="note">Based on <a href="https://github.com/filipedeschamps/doom-fire-algorithm" target="_blank" rel="noopener noreferrer">Filipe Deschamps’ Doom Fire Algorithm</a>.</p>
+        </div>
+      </section>
+      <section id="projectm-panel" role="tabpanel" aria-labelledby="projectm-tab" hidden>
+        <div class="card video-card">
+          <div class="eyebrow">MilkDrop · live Mac audio</div>
+          <h2>projectM</h2>
+          <p>Explore flowing waves, particles and kaleidoscopes from projectM. Each animation fills the square LED display and reacts to the music playing on your Mac.</p>
+          <div class="row">
+            <button id="projectm-start" type="button" disabled>▶ Start projectM</button>
+            <button id="projectm-stop" type="button" hidden>Return to audio visualizer</button>
+          </div>
+          <p id="projectm-status" class="note" role="status">Connecting to the LED app…</p>
+          <fieldset id="projectm-controls" disabled>
+            <label for="projectm-search">Find a preset</label>
+            <input id="projectm-search" type="search" placeholder="Search waves, fractals, particles…" />
+            <label for="projectm-preset">Preset</label>
+            <select id="projectm-preset" aria-label="projectM preset"></select>
+            <p id="projectm-count" class="note"></p>
+            <div class="row">
+              <button id="projectm-favorite" type="button" aria-pressed="false">☆ Add to favorites</button>
+            </div>
+            <div class="row">
+              <button id="projectm-previous" type="button">← Previous</button>
+              <button id="projectm-next" type="button">Next →</button>
+              <button id="projectm-randomize" type="button">Randomize</button>
+            </div>
+            <p class="note">Randomize plays one preset from the full library and turns off automatic changes.</p>
+            <label class="check"><input id="projectm-auto" type="checkbox" checked /> Automatically change presets</label>
+            <label for="projectm-duration">Seconds per preset</label>
+            <select id="projectm-duration">
+              <option value="10">10 seconds</option>
+              <option value="30" selected>30 seconds</option>
+              <option value="60">1 minute</option>
+              <option value="120">2 minutes</option>
+              <option value="300">5 minutes</option>
+            </select>
+            <h3>Favorites</h3>
+            <p id="projectm-favorites-empty" class="note">Save a preset with Add to favorites. Your favorites will appear here.</p>
+            <div id="projectm-favorites" role="group" aria-label="Favorite presets"></div>
+          </fieldset>
+          <p id="projectm-now" class="note"></p>
+          <canvas id="projectm-preview" class="video-led-preview" width="384" height="384"
+            role="img" aria-label="Live projectM animation sent to the LEDs"></canvas>
+          <p class="note">Brightness and saturation follow Audio palette. projectM keeps its original preset colors and continues playing when you browse other tabs.</p>
+          <p class="note">Powered by <a href="https://github.com/projectM-visualizer/frontend-sdl-cpp" target="_blank" rel="noopener noreferrer">projectM</a> and the Cream of the Crop preset collection.</p>
+        </div>
+      </section>
+      <section id="doom-panel" role="tabpanel" aria-labelledby="doom-tab" hidden>
+        <div class="card">
+          <h2>Play Doom</h2>
+          <p class="note">Keyboard play with Freedoom's free levels and assets. The full game appears here and streams to the LED board. Leaving this tab ends the game and restores the previous display.</p>
+          <iframe id="doom-player" title="Keyboard-playable Doom" style="width:100%;height:680px;border:0;border-radius:12px" allow="autoplay; fullscreen"></iframe>
+        </div>
+      </section>
     </main>
     <script>
       "use strict";
@@ -665,6 +788,8 @@
         videoStarting = false,
         videoLaunchMessage = null,
         motionLaunchError = null,
+        fireChanging = false,
+        fireError = null,
         videoConnected = false,
         previewAvailable = false,
         previewStart = 0,
@@ -692,10 +817,15 @@
         return data;
       }
       function setTab(name) {
+        if (name !== "doom" && activeTab === "doom") {
+          $("doom-player").contentWindow?.stopDoom?.();
+          $("doom-player").removeAttribute("src");
+        }
+        if (name === "doom" && !$("doom-player").getAttribute("src")) $("doom-player").src = "/doom/index.html";
         activeTab = name;
         drawnFrameKey = null;
         if (name !== "video" && videoConnected) videoPreview.pause();
-        for (const tab of ["audio", "video", "motion"]) {
+        for (const tab of ["audio", "video", "motion", "fire", "doom", "projectm"]) {
           const selected = tab === name;
           $(tab + "-tab").setAttribute("aria-selected", String(selected));
           $(tab + "-panel").hidden = !selected;
@@ -705,9 +835,203 @@
       $("audio-tab").addEventListener("click", () => setTab("audio"));
       $("video-tab").addEventListener("click", () => setTab("video"));
       $("motion-tab").addEventListener("click", () => setTab("motion"));
+      $("fire-tab").addEventListener("click", () => setTab("fire"));
+      $("doom-tab").addEventListener("click", () => setTab("doom"));
+      $("projectm-tab").addEventListener("click", () => { setTab("projectm"); loadProjectMPresets(); });
       $("motion-timeline").addEventListener("click", () => setTab("video"));
       $("motion-pause").addEventListener("click", () => $("video-pause").click());
       $("motion-restart").addEventListener("click", () => seekVideo(0));
+
+      let projectmPresets = null, projectmLoading = false, projectmChanging = false;
+      let projectmState = null, projectmListKey = null, projectmError = null;
+      let projectmFavoritesKey = null;
+      async function loadProjectMPresets() {
+        if (projectmPresets || projectmLoading) return;
+        projectmLoading = true;
+        try {
+          projectmPresets = (await request("/api/projectm/presets")).presets;
+          filterProjectMPresets();
+          renderProjectMFavorites();
+        } catch (error) { setText("projectm-status", error.message); }
+        finally { projectmLoading = false; }
+      }
+      function filterProjectMPresets() {
+        if (!projectmPresets) return;
+        const query = $("projectm-search").value.trim().toLowerCase();
+        const key = `${query}:${projectmState?.preset}`;
+        if (projectmListKey === key) return;
+        projectmListKey = key;
+        const matches = projectmPresets.filter(p => p.name.toLowerCase().includes(query));
+        const choices = [...matches];
+        const selected = projectmPresets.find(p => p.id === projectmState?.preset);
+        if (selected && !choices.some(p => p.id === selected.id)) choices.unshift(selected);
+        $("projectm-preset").replaceChildren(...choices.map(p => new Option(p.name, p.id)));
+        if (selected) $("projectm-preset").value = String(selected.id);
+        setText("projectm-count", `${matches.length.toLocaleString()} presets`);
+      }
+      function renderProjectM(data) {
+        const state = data.projectm;
+        if (!state) return;
+        projectmState = state;
+        const isFavorite = (state.favorites || []).includes(state.preset);
+        setText("projectm-favorite", isFavorite ? "★ Remove from favorites" : "☆ Add to favorites");
+        $("projectm-favorite").setAttribute("aria-pressed", String(isFavorite));
+        renderProjectMFavorites();
+        const busy = projectmChanging || videoStarting || refreshing || data.video_starting
+          || ["pending", "resetting"].includes(data.board_reset?.status);
+        setFlag("projectm-start", "disabled", busy || state.active || !state.available || !data.projectm_start_available);
+        setFlag("projectm-stop", "hidden", !state.active);
+        setFlag("projectm-stop", "disabled", busy);
+        setFlag("projectm-controls", "disabled", busy || !state.available || !data.projectm_start_available || data.mode === "video");
+        setText("projectm-start", state.active ? "● projectM active" : "▶ Start projectM");
+        setText("projectm-status", projectmError || state.error || (!state.available
+          ? "projectM needs setup. Run .venv/bin/python scripts/setup_projectm.py, then reload the app."
+          : !data.projectm_start_available ? "Open the live LED app to stream projectM."
+          : state.active ? `Live · ${state.size} × ${state.size} LEDs · music from your Mac`
+          : "Ready to play on the LED display."));
+        setText("projectm-now", state.active ? `Now playing · ${state.name}` : "");
+        if (!projectmChanging) {
+          $("projectm-auto").checked = state.auto;
+          $("projectm-duration").value = String(state.duration);
+        }
+        if (activeTab === "projectm") { loadProjectMPresets(); filterProjectMPresets(); }
+      }
+      function renderProjectMFavorites() {
+        if (!projectmPresets || !projectmState) return;
+        const ids = projectmState.favorites || [];
+        const key = `${ids.join(",")}:${projectmState.preset}:${projectmState.active}`;
+        if (projectmFavoritesKey === key) return;
+        projectmFavoritesKey = key;
+        const favorites = new Set(ids);
+        const buttons = projectmPresets.filter(p => favorites.has(p.id)).map(preset => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = preset.name;
+          button.dataset.preset = preset.id;
+          button.setAttribute("aria-pressed", String(projectmState.active && preset.id === projectmState.preset));
+          button.addEventListener("click", () => changeProjectM("favorite-play", {preset: preset.id}));
+          return button;
+        });
+        $("projectm-favorites").replaceChildren(...buttons);
+        setFlag("projectm-favorites-empty", "hidden", buttons.length > 0);
+      }
+      async function changeProjectM(action, payload = {}) {
+        if (projectmChanging || videoStarting || refreshing) return;
+        projectmChanging = true;
+        projectmError = null;
+        setText("projectm-status", action === "start" ? "Starting projectM…" : "Updating projectM…");
+        try {
+          const result = await request(`/api/projectm/${action}`, {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
+          });
+          if (result.starting) {
+            videoStarting = true;
+            const deadline = Date.now() + 45000;
+            while (Date.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+              let current;
+              try { current = await request("/api/state"); } catch { continue; }
+              if (current.session !== result.session) { window.location.reload(); return; }
+            }
+            throw new Error("Could not start projectM. Check the LED app and USB connection.");
+          }
+          projectmChanging = false;
+          renderProjectM(result);
+          drawnFrameKey = null;
+          if (action === "stop") setTab("audio");
+        } catch (error) {
+          projectmError = error.message;
+          setText("projectm-status", error.message);
+        } finally { projectmChanging = false; videoStarting = false; }
+      }
+      $("projectm-start").addEventListener("click", () => changeProjectM("start"));
+      $("projectm-stop").addEventListener("click", () => changeProjectM("stop"));
+      $("projectm-next").addEventListener("click", () => changeProjectM("next"));
+      $("projectm-randomize").addEventListener("click", () => changeProjectM("randomize"));
+      $("projectm-favorite").addEventListener("click", () => {
+        if (!projectmState) return;
+        changeProjectM("favorite", {
+          preset: projectmState.preset,
+          favorite: !(projectmState.favorites || []).includes(projectmState.preset),
+        });
+      });
+      $("projectm-previous").addEventListener("click", () => changeProjectM("previous"));
+      $("projectm-search").addEventListener("input", filterProjectMPresets);
+      $("projectm-preset").addEventListener("change", () => changeProjectM("preset", {preset: Number($("projectm-preset").value)}));
+      for (const id of ["projectm-auto", "projectm-duration"]) $(id).addEventListener("change", () => changeProjectM("settings", {
+        auto: $("projectm-auto").checked, duration: Number($("projectm-duration").value),
+      }));
+
+      function renderFire(data) {
+        const running = Boolean(data.fire?.active);
+        const busy = fireChanging || videoStarting || data.video_starting || refreshing
+          || ["pending", "resetting"].includes(data.board_reset?.status);
+        setFlag("fire-start", "disabled", busy || running || !data.fire_start_available);
+        setText("fire-start", fireChanging ? "Starting…" : running ? "● Doom Fire active" : "▶ Start Doom Fire");
+        setFlag("fire-stop", "hidden", !running);
+        setFlag("fire-stop", "disabled", busy);
+        setFlag("fire-controls", "disabled", busy || !running);
+        setFlag("fire-live", "hidden", !running);
+        setText("fire-status", fireError || (fireChanging ? "Connecting Doom Fire to the LEDs…"
+          : running ? data.fire.audible ? "Flame height and heat follow the music on your Mac."
+            : "Quiet / silent · embers fading."
+          : !data.fire_start_available ? "Open the live LED app to use Doom Fire."
+          : "Start Doom Fire to send music-driven flames to the panel."));
+        const energy = data.fire?.energy || 0;
+        $("fire-energy").value = energy;
+        setText("fire-energy-value", `${Math.round(energy * 100)}%`);
+        setText("fire-height", `${Math.round((data.fire?.height || 0) * 100)}%`);
+      }
+      async function changeFire(start) {
+        if (fireChanging || videoStarting || refreshing) return;
+        fireChanging = true;
+        fireError = null;
+        setFlag("fire-start", "disabled", true);
+        setFlag("fire-stop", "disabled", true);
+        setText("fire-status", start ? "Starting Doom Fire…" : "Returning to the audio visualizer…");
+        try {
+          const result = await request(start ? "/api/fire/start" : "/api/fire/stop", {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+          });
+          if (result.starting) {
+            videoStarting = true;
+            const deadline = Date.now() + 45000;
+            while (Date.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+              let current;
+              try { current = await request("/api/state"); } catch { continue; }
+              if (current.session !== result.session && current.fire?.active) {
+                setTab("fire");
+                window.location.reload();
+                return;
+              }
+            }
+            throw new Error("Could not start Doom Fire. Check the LED app and USB connection.");
+          } else {
+            decodePreview(result);
+            renderFire(result);
+            drawnFrameKey = null;
+            if (!start) setTab("audio");
+          }
+        } catch (error) {
+          fireError = error.message;
+          setText("fire-status", error.message);
+        } finally {
+          fireChanging = false;
+          videoStarting = false;
+        }
+      }
+      $("fire-start").addEventListener("click", () => changeFire(true));
+      $("fire-stop").addEventListener("click", () => changeFire(false));
+      $("fire-brightness").addEventListener("input", () => {
+        if (!settings || $("fire-controls").disabled) return;
+        settings.brightness = Number($("fire-brightness").value) / 100;
+        $("brightness").value = $("fire-brightness").value;
+        $("brightness-value").value = $("fire-brightness").value + "%";
+        $("fire-brightness-value").value = $("fire-brightness").value + "%";
+        queueUpdate();
+      });
+      $("fire-slowdown").addEventListener("input", () => setSlowdown(Number($("fire-slowdown").value)));
 
       function renderMotion(data) {
         const running = Boolean(data.video?.audio_motion);
@@ -1173,7 +1497,7 @@
           $("preview").setAttribute("aria-label", label);
         drawVideoLed(data.frame, $("preview"), !videoConnected);
       }
-      function drawVideoLed(frame, canvas = videoLedCanvas, dots = false) {
+      function drawVideoLed(frame, canvas = videoLedCanvas, dots = false, preserveHue = false) {
         if (!frame) return;
         const rows = frame.size || frame.length;
         const columns = frame.size || frame[0]?.length;
@@ -1186,11 +1510,24 @@
             previewPixels.data[offset] = 255;
         }
         const pixels = previewPixels.data;
+        let gain = 12;
+        if (preserveHue) {
+          let peak = 1;
+          if (frame.rgb) {
+            for (const value of frame.rgb) peak = Math.max(peak, value);
+          } else {
+            for (const row of frame)
+              for (const color of row) peak = Math.max(peak, ...color);
+          }
+          // One gain for the whole fire preserves both RGB hue ratios and
+          // the intensity difference between dark tips and bright cores.
+          gain = Math.min(gain, 255 / peak);
+        }
         for (let index = 0; index < rows * columns; index++) {
           for (let channel = 0; channel < 3; channel++) {
             const value = frame.rgb ? frame.rgb[index * 3 + channel]
               : frame[Math.floor(index / columns)][index % columns][channel];
-            pixels[index * 4 + channel] = dots ? Math.max(12, value) : Math.min(255, value * 12);
+            pixels[index * 4 + channel] = dots ? Math.max(12, value) : Math.min(255, value * gain);
           }
         }
         videoPixelContext.putImageData(previewPixels, 0, 0);
@@ -1304,12 +1641,16 @@
           $(key + "-value").value = $(key).value + "%";
         }
         renderSlowdown();
+        $("fire-brightness").value = $("brightness").value;
+        $("fire-brightness-value").value = $("brightness").value + "%";
       }
       function renderSlowdown() {
         const value = settings.slowdown;
         $("slowdown").value = value;
         $("slowdown").setAttribute("aria-valuetext", `${value}% slowdown, ${100 - value}% speed`);
         $("slowdown-value").value = value + "%";
+        $("fire-slowdown").value = value;
+        $("fire-slowdown-value").value = value + "%";
       }
       function setSlowdown(value) {
         if (!settings || $("controls").disabled) return;
@@ -1514,7 +1855,11 @@
           if (data.youtube?.status === "error") youtubeSession = null;
           dataFps = Math.max(1, data.video?.fps || 30);
           if (refreshing || videoStarting) { setTimeout(poll, 250); return; }
-          if (activeTab === null) setTab(location.hash === "#motion" ? "motion"
+          if (activeTab === null) setTab(location.hash === "#doom" ? "doom"
+            : location.hash === "#projectm" || data.projectm?.active && !location.hash ? "projectm"
+            : location.hash === "#fire" ? "fire"
+            : data.fire?.active && !location.hash ? "fire"
+            : location.hash === "#motion" ? "motion"
             : location.hash === "#audio" ? "audio"
             : data.video?.audio_motion && !location.hash ? "motion"
             : data.mode === "video" || location.hash === "#video" ? "video" : "audio");
@@ -1535,6 +1880,8 @@
           setFlag("audio-tab", "disabled", videoMode && !reactiveVideo);
           renderVideo(data.video, data.video_file_available, data.video_start_available, data.videos, data.video_starting);
           renderMotion(data);
+          renderFire(data);
+          renderProjectM(data);
           const modeKey = `${data.mode}:${Boolean(data.video?.audio_motion)}:${videoConnected}`;
           if (renderedMode !== modeKey) {
             renderedMode = modeKey;
@@ -1582,6 +1929,8 @@
             if (!document.hidden && data.frame && drawnFrameKey !== previewFrameKey) {
               if (activeTab === "video" && videoMode && data.video?.connected) drawVideoLed(data.frame);
               else if (activeTab === "motion" && data.video?.audio_motion) drawVideoLed(data.frame, $("motion-preview"));
+              else if (activeTab === "fire" && data.fire?.active) drawVideoLed(data.frame, $("fire-preview"), false, true);
+              else if (activeTab === "projectm" && data.projectm?.active) drawVideoLed(data.frame, $("projectm-preview"), false, true);
               else if (activeTab === "audio") draw(data);
               drawnFrameKey = previewFrameKey;
             }

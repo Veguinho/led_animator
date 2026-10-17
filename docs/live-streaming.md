@@ -10,6 +10,11 @@ existing CH340 USB port. Its default baud rate is 1,500,000. The video streamer
 defaults to `--display-size 48` and the source video's frame rate; the Wex clip
 runs at 29.97 FPS. Upload the updated live firmware once to enable compressed
 frames.
+Live audio targets 30 FPS and sends compressed frames when they are
+smaller. Actual throughput depends on frame compression and rendering time;
+the current projectM preset measured roughly 20–23 FPS after startup over CH340.
+Firmware uses fixed spatial brightness rounding, so held colors do
+not blink as temporal rounding phases change.
 The terminal reports measured FPS and skipped frames every five seconds.
 Acknowledgement timeouts default to 0.2 seconds so an occasional lost reply
 does not pause playback for a full second; retries retain CRC validation and
@@ -34,8 +39,10 @@ black keep their hue but use progressively less PWM power instead of being
 shown as equally bright colors.
 Direct video playback defaults to the source frame rate. Pass `--fps` to cap it.
 At 48×48, each LED and the total scene brightness are capped, and sudden
-whole-frame light changes are eased. The streamer also enables a matching
-per-pixel limit in firmware, applied after decompression. Run the full Wex
+whole-frame light changes are eased. RGB565 uses its full range so shades
+survive transmission; the firmware maps them into stable PWM with spatial rounding under the
+existing output ceiling after decompression. Upload the updated firmware when
+updating the streamer. Run the full Wex
 video at its original 29.97 FPS with:
 
 ```bash
@@ -156,6 +163,22 @@ ffmpeg -y -i 'wex.muzik PARTAE.mp4' -t 60 \
 python3 stream_arduino.py .build/mp4-cache/wex-first-minute-48x48-24fps.mp4 \
   --fps 24 --loop --clear-on-exit
 ```
+
+To check grayscale independently of audio palettes, stop the active streamer
+and show sixteen stationary gray bars from black to white:
+
+```bash
+.venv/bin/python scripts/check_grayscale.py --port /dev/cu.usbserial-1420
+.venv/bin/python scripts/check_grayscale.py --port /dev/cu.usbserial-1420 --video
+```
+
+Use `--image photo.png` to show a still image converted to grayscale, or
+`--seconds 60` for a longer camera check. The default gamma of 1 tests the raw
+firmware response; `--led-gamma 2.2` matches normal video intensity mapping.
+The diagnostic uses the normal CRC
+and acknowledgement protocol and clears the screen on exit. Stop the macOS
+background audio service first (`.venv/bin/python audio_service.py stop`) if
+it is running, so it cannot reopen the serial port during the check.
 
 Use `--no-flash-limit` only when the unmodified source brightness is wanted.
 `--no-compression` retains compatibility with older streaming firmware, though
@@ -428,6 +451,10 @@ There is no automatic brightness cycle or peak normalization. The final
 output stage uses a 0.15-second rise and 0.30-second fall; it does not boost dim
 frames. Beats appear quickly while the gentler release avoids abrupt flashes.
 Audio-reactive effects still follow the music and fade in silence.
-The firmware output scale is 60/255; black stays off. These percentages
+The firmware maps brightness into its fixed PWM ceiling with spatial
+rounding to preserve dim shades without cycling them on/off; black stays off. The ceiling is now 20%
+higher, so the software slider's 100% represents the new maximum. The video
+limiter's changing-scene mean allowance also rises 20%, from 170 to 204;
+wire RGB values still use 0–255. These percentages
 are software levels, not a measurement of physical light output. This limit
 cannot prevent flashes caused by corrupted LED signals or faulty wiring.

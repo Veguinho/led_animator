@@ -6,6 +6,7 @@ import colorsys
 import base64
 import copy
 import json
+import mimetypes
 import re
 import sys
 import threading
@@ -13,11 +14,15 @@ import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import numpy as np
 
 from video_controls import VideoPlaybackControls
 from board_controls import BoardResetControls
+from doom_fire import DoomFireControls
+from doom_controls import DoomControls
+from projectm_controls import ProjectMControls
 
 
 PRESETS = {
@@ -144,6 +149,8 @@ class PaletteControls:
     def __init__(self, slowdown: float = DEFAULT_SLOWDOWN, *, size: int = 16,
                  settings_path: Path | None = None) -> None:
         self.size = size
+        self.doom = DoomControls(size)
+        self.projectm = ProjectMControls(size)
         self._lock = threading.Lock()
         self._settings = validate_settings(default_settings() | {"slowdown": slowdown})
         self._settings_path = settings_path
@@ -220,6 +227,9 @@ class PaletteServer:
         board_controls: BoardResetControls | None = None,
         on_reset: Callable[[], dict] | None = None,
         on_motion_start: Callable[[Path], None] | None = None,
+        fire_controls: DoomFireControls | None = None,
+        on_fire_start: Callable[[], None] | None = None,
+        on_projectm_start: Callable[[], None] | None = None,
     ) -> None:
         if video_path is not None and not video_path.is_file():
             raise ValueError(f"video does not exist: {video_path}")
@@ -261,6 +271,11 @@ class PaletteServer:
                 "video_file_available": video_path is not None,
                 "video_start_available": on_video_start is not None,
                 "motion_start_available": on_motion_start is not None,
+                "fire_start_available": fire_controls is not None or on_fire_start is not None,
+                "fire": fire_controls.state() if fire_controls is not None else None,
+                "projectm": controls.projectm.state(),
+                "projectm_start_available": fire_controls is not None or on_projectm_start is not None,
+                "doom": controls.doom.state() | {"connected": board_controls is not None},
                 "videos": list(library()),
                 "video_starting": launching,
                 "youtube_available": on_video_start is not None,
@@ -283,7 +298,10 @@ class PaletteServer:
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Closing a tab can interrupt the local game bundle download.
 
             def json_response(self, status: int, value: dict) -> None:
                 self.respond(status, json.dumps(value).encode(), "application/json")
@@ -334,7 +352,16 @@ class PaletteServer:
                     pass
 
             def do_GET(self) -> None:
-                if self.path == "/":
+                if self.path.startswith("/doom/"):
+                    root = Path(__file__).with_name("doom_game") / "web"
+                    asset = (root / unquote(urlsplit(self.path).path.removeprefix("/doom/"))).resolve()
+                    if not asset.is_relative_to(root.resolve()) or not asset.is_file():
+                        self.json_response(404, {"error": "not found"})
+                        return
+                    content_type = ("application/wasm" if asset.suffix == ".wasm"
+                                    else mimetypes.guess_type(asset.name)[0] or "application/octet-stream")
+                    self.respond(200, asset.read_bytes(), content_type)
+                elif self.path == "/":
                     self.respond(200, page, "text/html; charset=utf-8")
                 elif self.path == "/api/state":
                     self.json_response(200, state())
@@ -342,6 +369,8 @@ class PaletteServer:
                     self.json_response(200, state(compact=True))
                 elif self.path == "/api/video/library":
                     self.json_response(200, {"videos": list(library(refresh=True))})
+                elif self.path == "/api/projectm/presets":
+                    self.json_response(200, {"presets": controls.projectm.library()})
                 elif self.path == "/api/video/file":
                     self.serve_video()
                 else:
@@ -357,7 +386,7 @@ class PaletteServer:
 
             def do_POST(self) -> None:
                 nonlocal launching
-                if self.path not in ("/api/palette", "/api/refresh", "/api/reset", "/api/boards/reset", "/api/video/seek", "/api/video/start", "/api/video/motion/start", "/api/youtube/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
+                if self.path not in ("/api/projectm/start", "/api/projectm/stop", "/api/projectm/preset", "/api/projectm/next", "/api/projectm/previous", "/api/projectm/randomize", "/api/projectm/favorite", "/api/projectm/favorite-play", "/api/projectm/settings", "/api/doom/start", "/api/doom/frame", "/api/doom/stop", "/api/palette", "/api/refresh", "/api/reset", "/api/boards/reset", "/api/fire/start", "/api/fire/stop", "/api/video/seek", "/api/video/start", "/api/video/motion/start", "/api/youtube/start", "/api/video/playback", "/api/video/texture-mapping", "/api/video/layers"):
                     self.json_response(404, {"error": "not found"})
                     return
                 # Accept only this local panel's JSON requests.
@@ -372,10 +401,48 @@ class PaletteServer:
                     if self.headers.get_content_type() != "application/json":
                         raise ValueError("expected application/json")
                     length = int(self.headers.get("Content-Length", "0"))
-                    if not 0 < length <= 4096:
+                    maximum = controls.size * controls.size * 4 + 256 if self.path == "/api/doom/frame" else 4096
+                    if not 0 < length <= maximum:
                         raise ValueError("invalid request size")
                     payload = json.loads(self.rfile.read(length))
-                    if self.path in ("/api/refresh", "/api/reset", "/api/boards/reset"):
+                    if self.path.startswith("/api/projectm/"):
+                        action = self.path.rsplit("/", 1)[1]
+                        if fire_controls is None and (action != "start" or on_projectm_start is None):
+                            self.json_response(503, {"error": "projectM is available in the live LED app."})
+                            return
+                        with launch_lock:
+                            if launching or (board_controls is not None and board_controls.state()["status"] in ("pending", "resetting")):
+                                self.json_response(409, {"error": "Wait for the current start or reset to finish."})
+                                return
+                            controls.projectm.action(action, payload)
+                            if action in ("start", "randomize", "favorite-play") and fire_controls is not None:
+                                fire_controls.set_active(False)
+                            if action == "start" and fire_controls is None:
+                                launching = True
+                        if action == "start" and fire_controls is None:
+                            self.json_response(202, {"starting": True, "session": session})
+                            self.wfile.flush()
+                            on_projectm_start()
+                        else:
+                            self.json_response(200, state())
+                        return
+                    if self.path.startswith("/api/doom/"):
+                        if self.path == "/api/doom/start":
+                            if payload != {}:
+                                raise ValueError("Doom start expects an empty JSON object")
+                            if launching or (board_controls is not None and board_controls.state()["status"] in ("pending", "resetting")):
+                                self.json_response(409, {"error": "Wait for the current start or reset to finish."})
+                                return
+                            result = controls.doom.start()
+                            self.json_response(200, result | {"connected": board_controls is not None})
+                        else:
+                            if self.path == "/api/doom/frame":
+                                controls.doom.update(payload)
+                            else:
+                                controls.doom.stop(payload)
+                            self.json_response(200, {"ok": True})
+                        return
+                    elif self.path in ("/api/refresh", "/api/reset", "/api/boards/reset", "/api/fire/start", "/api/fire/stop"):
                         if payload != {}:
                             raise ValueError("this action expects an empty JSON object")
                     elif self.path == "/api/video/motion/start":
@@ -432,7 +499,30 @@ class PaletteServer:
                     self.json_response(400, {"error": str(exc)})
                     return
                 except OSError:
-                    self.json_response(500, {"error": "could not save palette settings"})
+                    self.json_response(500, {"error": "could not save projectM favorites" if self.path == "/api/projectm/favorite" else "could not save palette settings"})
+                    return
+                if self.path in ("/api/fire/start", "/api/fire/stop"):
+                    start = self.path == "/api/fire/start"
+                    if fire_controls is None and (not start or on_fire_start is None):
+                        self.json_response(503, {"error": "Doom Fire is available in the live LED app."})
+                        return
+                    with launch_lock:
+                        if launching or (board_controls is not None and
+                            board_controls.state()["status"] in ("pending", "resetting")):
+                            self.json_response(409, {"error": "Wait for the current start or reset to finish."})
+                            return
+                        if fire_controls is not None:
+                            if start:
+                                controls.projectm.action("stop", {})
+                            fire_controls.set_active(start)
+                        else:
+                            launching = True
+                    if fire_controls is not None:
+                        self.json_response(200, state())
+                    else:
+                        self.json_response(202, {"starting": True, "session": session})
+                        self.wfile.flush()
+                        on_fire_start()
                     return
                 if self.path == "/api/reset":
                     if on_reset is None:

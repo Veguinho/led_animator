@@ -60,7 +60,7 @@ class BoardResetTests(unittest.TestCase):
         sent = []
         source = stream.FrameSource(10, lambda: iter([bytes([i]) * 512 for i in (1, 2, 3)]))
 
-        def exchange(connection, kind, sequence, payload, *args):
+        def exchange(connection, kind, sequence, payload, *args, **kwargs):
             sent.append((payload[0], now[0]))
             if len(sent) == 1:
                 boards.request()
@@ -94,7 +94,7 @@ class BoardResetTests(unittest.TestCase):
         sent = []
         source = stream.FrameSource(10, lambda: iter([bytes([i]) * 512 for i in (1, 2, 3)]))
 
-        def exchange(connection, kind, sequence, payload, *args):
+        def exchange(connection, kind, sequence, payload, *args, **kwargs):
             sent.append((payload[0], now[0]))
             if len(sent) == 1:
                 video.set_paused(True)

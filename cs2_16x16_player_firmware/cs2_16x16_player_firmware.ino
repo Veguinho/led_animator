@@ -7,21 +7,28 @@
 #error "This sketch requires an ESP32-S3."
 #endif
 
-// Bake a 60/255 brightness ceiling into every pixel byte before it reaches
-// any output lane. Keep the driver at 255 so all nine GPIOs transmit the same
-// already-limited values, including the top-right panel on GPIO9.
-constexpr uint8_t OUTPUT_SCALE = 60;
+// Raise output allowances by 20% without clipping the input's gray range.
+// All nine GPIOs receive the same already-limited PWM bytes.
+constexpr uint16_t BRIGHTNESS_GAIN_NUMERATOR = 6;
+constexpr uint16_t BRIGHTNESS_GAIN_DENOMINATOR = 5;
+constexpr uint8_t OUTPUT_SCALE = 60 * BRIGHTNESS_GAIN_NUMERATOR / BRIGHTNESS_GAIN_DENOMINATOR;
 constexpr uint8_t DRIVER_BRIGHTNESS = 255;
 constexpr uint16_t MAX_PIXEL_RGB_TOTAL = 64;
 constexpr uint16_t MAX_TRANSMITTED_RGB_TOTAL =
     MAX_PIXEL_RGB_TOTAL * OUTPUT_SCALE / 255;
-constexpr uint8_t MAX_VIDEO_RGB_TOTAL = 4;
+// Fractional budgets avoid rounding a 20% increase from 4 to 5 (+25%).
+constexpr uint16_t VIDEO_PIXEL_PWM_Q8 = 4 * 256 * BRIGHTNESS_GAIN_NUMERATOR / BRIGHTNESS_GAIN_DENOMINATOR;
+constexpr uint16_t VIDEO_NEUTRAL_PWM_Q8 = 256 * BRIGHTNESS_GAIN_NUMERATOR / BRIGHTNESS_GAIN_DENOMINATOR;
+constexpr uint8_t MAX_VIDEO_RGB_TOTAL = (VIDEO_PIXEL_PWM_Q8 + 255) / 256;
+// Neutral pixels round whole RGB triplets together. A fixed spatial pattern
+// averages 1.2 per channel across the panel without blinking individual LEDs.
+constexpr uint8_t MAX_VIDEO_NEUTRAL_RGB_TOTAL = 3 * ((VIDEO_NEUTRAL_PWM_Q8 + 255) / 256);
 
 // FastLED estimates 1 mA of idle draw per LED: nine 16x16 panels already
-// exceed 2 A before any channel lights. A 4 A ceiling leaves room for that
+// exceed 2 A before any channel lights. A 4.8 A ceiling leaves room for that
 // baseline plus the firmware's separately capped channel output.
 // This software estimate is not a substitute for hardware current protection.
-constexpr uint32_t MAX_POWER_MILLIAMPS = 4000;
+constexpr uint32_t MAX_POWER_MILLIAMPS = 4000 * BRIGHTNESS_GAIN_NUMERATOR / BRIGHTNESS_GAIN_DENOMINATOR;
 constexpr bool RUN_STARTUP_MATRIX_TEST = false;
 
 // The installed board's only USB socket uses a CH340 connected to UART0.
@@ -53,6 +60,7 @@ const uint8_t REQUEST_MAGIC[4] = {'L', 'E', 'D', 'S'};
 const uint8_t RESPONSE_MAGIC[4] = {'L', 'E', 'D', 'R'};
 
 CRGB leds[NUM_LEDS];
+struct PixelPwm { uint16_t r, g, b; };
 // Only a complete, CRC-verified payload can replace the display buffer.
 uint8_t packetPayload[MAX_PACKET_PAYLOAD];
 uint8_t expandedFrame[BYTES_PER_FRAME];
@@ -108,43 +116,66 @@ CRGB decodeRgb565(uint16_t color) {
       (blue5 << 3) | (blue5 >> 2));
 }
 
-CRGB limitPixelBrightness(CRGB color) {
+PixelPwm pixelPwm(CRGB color, bool videoFrame = false) {
   const uint16_t total = static_cast<uint16_t>(color.r) + color.g + color.b;
-  if (total > MAX_PIXEL_RGB_TOTAL) {
-    color.r = static_cast<uint16_t>(color.r) * MAX_PIXEL_RGB_TOTAL / total;
-    color.g = static_cast<uint16_t>(color.g) * MAX_PIXEL_RGB_TOTAL / total;
-    color.b = static_cast<uint16_t>(color.b) * MAX_PIXEL_RGB_TOTAL / total;
+  if (total == 0) return {0, 0, 0};
+  const uint16_t peak = max(color.r, max(color.g, color.b));
+  const uint16_t budgetQ8 = videoFrame ? VIDEO_PIXEL_PWM_Q8 : MAX_TRANSMITTED_RGB_TOTAL * 256;
+  // RGB565 gives green an extra bit. Recognize its neutral ramp and round
+  // all three channels together so dim grays don't sparkle red/green/blue.
+  // Scale the previous neutral ceiling by the same 20% as colored pixels.
+  if (color.r == color.b &&
+      abs(static_cast<int>(color.g) - color.r) <= 4) {
+    const uint16_t neutralQ8 = videoFrame ? VIDEO_NEUTRAL_PWM_Q8 : (MAX_TRANSMITTED_RGB_TOTAL / 3) * 256;
+    const uint16_t gray = static_cast<uint32_t>(neutralQ8) * peak / 255;
+    return {gray, gray, gray};
   }
-  color.r = static_cast<uint16_t>(color.r) * OUTPUT_SCALE / 255;
-  color.g = static_cast<uint16_t>(color.g) * OUTPUT_SCALE / 255;
-  color.b = static_cast<uint16_t>(color.b) * OUTPUT_SCALE / 255;
-  return color;
+  // Map the ENTIRE input range to the existing output budget. Clamping the
+  // input sum first made nearly every gray above 21/255 equally bright.
+  // One common gain preserves hue; Q8 retains sub-PWM shadow detail.
+  const uint32_t numerator = static_cast<uint32_t>(budgetQ8) * peak;
+  const uint32_t denominator = static_cast<uint32_t>(total) * 255;
+  return {static_cast<uint16_t>(color.r * numerator / denominator),
+          static_cast<uint16_t>(color.g * numerator / denominator),
+          static_cast<uint16_t>(color.b * numerator / denominator)};
+}
+
+CRGB quantizePwm(PixelPwm target, uint8_t threshold) {
+  if (target.r == target.g && target.g == target.b) {
+    const uint8_t gray = (target.r + threshold) >> 8;
+    return CRGB(gray, gray, gray);
+  }
+  // Dependent rounding: each channel has the correct spatial average, and
+  // the sum NEVER exceeds ceil(target.r + target.g + target.b). Independent
+  // channel dithering could exceed the current ceiling on white pixels.
+  const uint16_t red = target.r + threshold;
+  const uint16_t green = red + target.g;
+  const uint16_t blue = green + target.b;
+  return CRGB(red >> 8, (green >> 8) - (red >> 8),
+              (blue >> 8) - (green >> 8));
+}
+
+CRGB limitPixelBrightness(CRGB color) {
+  return quantizePwm(pixelPwm(color), 0);
+}
+
+uint8_t spatialThreshold(uint16_t index) {
+  // This threshold MUST stay fixed for each physical pixel. Cycling it at
+  // animation FPS switched dim channels on/off at visibly low frequencies.
+  return index * 73 + (index >> 4) * 29;
 }
 
 void showLimitedFrame(bool videoFrame = false) {
   FastLED.wait();
-  for (uint16_t index = 0; index < NUM_LEDS; ++index) {
-    CRGB color = limitPixelBrightness(leds[index]);
-    if (videoFrame) {
-      const uint16_t total = static_cast<uint16_t>(color.r) + color.g + color.b;
-      if (total > MAX_VIDEO_RGB_TOTAL) {
-        color.r = static_cast<uint16_t>(color.r) * MAX_VIDEO_RGB_TOTAL / total;
-        color.g = static_cast<uint16_t>(color.g) * MAX_VIDEO_RGB_TOTAL / total;
-        color.b = static_cast<uint16_t>(color.b) * MAX_VIDEO_RGB_TOTAL / total;
-      }
-    }
-    leds[index] = color;
-  }
-  // Reapply the ceilings at every transmission, including startup tests.
+  for (uint16_t index = 0; index < NUM_LEDS; ++index)
+    leds[index] = quantizePwm(pixelPwm(leds[index], videoFrame), spatialThreshold(index));
+  // Both drivers receive identical stable bytes. The LEDs hold that PWM
+  // value between host frames; re-sending it does not increase hardware PWM.
   FastLED.setBrightness(DRIVER_BRIGHTNESS);
   FastLED.setDither(0);
   FastLED.show();
-  // Video ACK can follow queueing the transfer: the next packet is received
-  // into separate storage, and drawFrame waits before changing leds again.
-  // This overlaps UART reception with LED output at the source frame rate.
-  if (!videoFrame) {
-    FastLED.wait();
-  }
+  // ACK after queueing for audio as well as video. The next UART packet has
+  // separate storage; drawFrame waits before changing the in-flight LEDs.
 }
 
 void showMatrixCoverageTest() {
@@ -176,8 +207,10 @@ void sendResponse(uint8_t status, uint16_t detail, uint32_t sequence) {
 }
 
 bool readExact(uint8_t *destination, uint16_t length) {
-  return PANEL_SERIAL.readBytes(reinterpret_cast<char *>(destination), length) ==
-         length;
+  // Prioritize UART reception. Starting additional LED transfers inside a
+  // raw packet caused dropped bytes/CRC retries at 1.5 Mbaud on this board.
+  // Stable spatial rounding needs no extra transfers during UART reception.
+  return PANEL_SERIAL.readBytes(reinterpret_cast<char *>(destination), length) == length;
 }
 
 bool findRequestMagic() {
@@ -207,7 +240,7 @@ void drawFrame(const uint8_t *payload) {
     const uint8_t column = logicalIndex % WIDTH;
     leds[physicalIndex(row, column)] = decodeRgb565(color);
   }
-  // In video mode, the next packet may arrive during this LED transfer;
+  // The next packet may arrive during this LED transfer;
   // the wait at the top protects the buffer before the next frame replaces it.
   showLimitedFrame(videoMode);
 }

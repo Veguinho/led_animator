@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from lava_lamp_stream import LavaLampFluid
+import led_animator
 from audio_palette_controls import PaletteControls, default_settings
 from led_animator import LedAnimation, save_preview_mp4
 from system_audio_visualizer import AudioVisualizer, FFT_SIZE, SAMPLE_RATE
@@ -39,12 +40,20 @@ def spectrum_frames(samples: np.ndarray) -> list[np.ndarray]:
     return frames
 
 
-def export(name: str, frames: list[np.ndarray], audio: Path | None = None) -> None:
+def export(name: str, frames: list[np.ndarray], audio: Path | None = None,
+           *, fps: int = FPS) -> None:
     video = DESTINATION / f"{name}.mp4"
-    save_preview_mp4(
-        LedAnimation(np.stack(frames), FPS), video,
-        led_size=14, gap=2, preview_fps=FPS,
-    )
+    duration = len(frames) / fps
+    size = frames[0].shape[0]
+    previous_size = led_animator.GRID_SIZE
+    try:
+        led_animator.GRID_SIZE = size
+        save_preview_mp4(
+            LedAnimation(np.stack(frames), fps), video,
+            led_size=max(4, 256 // size - 2), gap=2, preview_fps=fps,
+        )
+    finally:
+        led_animator.GRID_SIZE = previous_size
     if audio is not None:
         with tempfile.TemporaryDirectory() as temporary:
             muxed = Path(temporary) / "with-audio.mp4"
@@ -52,7 +61,7 @@ def export(name: str, frames: list[np.ndarray], audio: Path | None = None) -> No
                 "ffmpeg", "-v", "error", "-y", "-i", str(video),
                 "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-                "-t", str(SECONDS), "-movflags", "+faststart", str(muxed),
+                "-t", str(duration), "-movflags", "+faststart", str(muxed),
             ], check=True)
             video.write_bytes(muxed.read_bytes())
     subprocess.run(
@@ -65,7 +74,7 @@ def export(name: str, frames: list[np.ndarray], audio: Path | None = None) -> No
         ],
         check=True,
     )
-    print(f"Rendered {name}: {SECONDS}s MP4 + looping GIF", flush=True)
+    print(f"Rendered {name}: {duration:g}s {size}×{size} MP4 + looping GIF", flush=True)
 
 
 def main() -> None:

@@ -3,14 +3,14 @@
 This mode uploads a short video through the existing CH340 USB socket, then
 plays it from ESP32-S3 PSRAM. Serial bandwidth affects the initial upload,
 but does not set the local playback rate. Playback defaults to **30 FPS** on
-the same four 16×16 panels, with IO10–IO13 arranged as the existing 2×2 grid.
+the same nine 16×16 panels, using the live receiver’s 3×3 layout.
 The live audio firmware and renderer remain separate.
 
 From the project root, with the virtual environment active:
 
 ```bash
 python main.py                         # interactive audio/video menu
-python main.py audio                   # install audio firmware, start wave at 20 FPS
+python main.py audio                   # install audio firmware, start wave at 30 FPS
 python main.py video video_clips/clip.mp4 --seconds 10
 ```
 
@@ -37,9 +37,8 @@ python main.py audio --no-upload       # only when audio firmware is installed
 Use `--port /dev/cu.usbserial-1420` if automatic detection finds multiple
 controllers. `--no-upload` always means the correct firmware is already on
 the board; the video protocol deliberately differs from the audio protocol
-to prevent accidentally displaying upload bytes as live frames. The 32×32
-video protocol also uses a distinct `PV32` signature so old 48×48 firmware
-cannot accept clips with the wrong frame dimensions.
+to prevent accidentally displaying upload bytes as live frames. The preloaded protocol retains its `PV32` signature for compatibility;
+frame dimensions are **48×48** in the current player and firmware.
 
 ## Capacity and preparation
 
@@ -48,13 +47,13 @@ The detected ESP32-S3 has **8 MB OPI PSRAM**. The video firmware enables
 driver. It reports its actual available capacity to the uploader. It does
 not fall back to internal RAM when PSRAM is missing.
 
-Each 32×32 RGB565 frame uses 2048 bytes. The maximum 6 MiB budget holds
-**3072 frames**, about **51.2 seconds at 60 FPS** or **102.4 seconds at 30 FPS**.
+Each 48×48 RGB565 frame uses 4608 bytes. The maximum 6 MiB budget holds
+**1365 frames**, about **22.75 seconds at 60 FPS** or **45.5 seconds at 30 FPS**.
 More complex images take the same space. Clips exceeding the budget are
 rejected before flashing; select a shorter segment with `--start`/`--seconds`.
 No SD card or extra USB connector is required.
 
-FFmpeg center-crops the video, resizes to 32×32, and resamples to the selected
+FFmpeg center-crops the video, resizes to 48×48, and resamples to the selected
 frame rate. A lower-rate source repeats frames at 60 FPS; this does not
 invent intermediate motion. Gamma defaults to 2.2, matching live video.
 Video sound is not played by this mode.
@@ -98,7 +97,7 @@ the fully loaded buffer still runs at 30 FPS.
 ## Playback and buffering
 
 After every chunk and the complete clip pass CRC32 verification, playback
-starts from PSRAM. The firmware decodes RGB565 into the four panel buffers
+starts from PSRAM. The firmware decodes RGB565 into the nine panel buffers
 and uses parallel LCD_CAM DMA with each channel explicitly assigned to
 `fl::Bus::LCD_CLOCKLESS`. With the installed FastLED 3.10.5, the legacy
 `addLeds<..., Bus>` template only links that driver and still binds its
@@ -134,25 +133,19 @@ rerun the uploader to begin a fresh transfer.
 
 ## Files and build
 
-To check every LED with a native 32×32 clip:
+The legacy test-clip generator creates a 32×32 source video, which the current
+uploader resizes to 48×48:
 
 ```bash
 python preloaded_video/make_test_clip.py
 python main.py video video_clips/panel_test_32x32.mp4 --no-upload
 ```
 
-This 12-second, 30 FPS loop fades through full-screen red, green, blue and
-white, then highlights all four panels in reading order (IO11, IO10, IO13, IO12).
-The default dimming and smoothing apply. Every pixel receives all three
-color channels; a panel remaining dark through the color washes is not
-explained by empty areas in this video. The expected panel positions are:
-
-```text
-IO11  IO10
-IO13  IO12
-```
-
-The images on IO11 and IO13 are mirrored horizontally, matching live audio.
+This 12-second, 30 FPS loop fades through red, green, blue and white, then
+highlights four image quadrants. Those quadrants describe the source video;
+the physical display has nine panels. The default dimming and smoothing apply.
+See the [hardware guide](../docs/hardware.md) for the current panel positions
+and orientation.
 
 For a gentle full-screen color fade with no white phase or panel highlights:
 
@@ -161,7 +154,7 @@ python preloaded_video/make_test_clip.py --pattern fade
 python main.py video video_clips/color_fade_32x32.mp4 --led-gamma 1 --brightness 0.15 --smooth-ms 250 --no-upload
 ```
 
-This 12-second loop uses four-second color transitions across all 1024 LEDs.
+This 12-second source loop uses four-second color transitions, scaled to all 2304 LEDs.
 The source keeps the total RGB intensity constant; the playback command
 applies dimming and smoothing before RGB565 encoding.
 

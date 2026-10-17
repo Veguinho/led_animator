@@ -13,7 +13,7 @@ from audio_palette_controls import PaletteControls, PaletteServer
 from system_audio_visualizer import AudioCapture
 from audio_energy import AdaptiveAudioEnergy
 from stream_arduino import (
-    _rgb565_pwm_totals, VIDEO_FIRMWARE_OUTPUT_SCALE, limit_video_flash, decode_rgb565_frame,
+    limit_video_flash, decode_rgb565_frame,
 )
 from video_audio_texture import LiveAudioVideoTexture
 from video_controls import VideoPlaybackControls
@@ -41,16 +41,12 @@ class CpuOptimizationTests(unittest.TestCase):
                     led_animator.map_led_intensity(frame.astype(np.float32), gamma),
                 )
 
-    def test_pixel_limiter_preserves_existing_threshold_and_rounding_rules(self):
+    def test_pixel_limiter_keeps_full_precision_without_mutating_source(self):
         frame = np.random.default_rng(17).integers(0, 256, (256, 256, 3), dtype=np.uint8)
-        values = frame.astype(np.float32)
-        total = values.sum(axis=2, keepdims=True)
-        peak = values.max(axis=2, keepdims=True)
-        strong = np.count_nonzero(values >= peak * 0.45, axis=2, keepdims=True)
-        limit = np.where(strong == 3, 36.0, np.where(strong == 2, 24.0, 32.0))
-        values *= np.minimum(1.0, limit / np.maximum(total, 1.0))
-        np.minimum(values, 20.0, out=values)
-        np.testing.assert_array_equal(limit_video_flash(frame), np.rint(values).astype(np.uint8))
+        result = limit_video_flash(frame)
+        np.testing.assert_array_equal(result, frame)
+        result.fill(0)
+        self.assertGreater(frame.max(), 0)
 
     def test_settings_and_preset_snapshots_cannot_mutate_live_state(self):
         controls = PaletteControls(size=48)
@@ -63,14 +59,6 @@ class CpuOptimizationTests(unittest.TestCase):
         state["presets"]["adaptive"].clear()
         self.assertEqual(controls.settings_snapshot()[1], original)
         self.assertTrue(controls.state(compact=True)["presets"]["adaptive"])
-
-    def test_pwm_lookup_preserves_firmware_total_for_all_rgb565_colors(self):
-        packed = np.arange(65536, dtype=np.uint32)
-        red5, green6, blue5 = (packed >> 11) & 31, (packed >> 5) & 63, packed & 31
-        channels = ((red5 << 3) | (red5 >> 2), (green6 << 2) | (green6 >> 4),
-                    (blue5 << 3) | (blue5 >> 2))
-        expected = sum(channel * VIDEO_FIRMWARE_OUTPUT_SCALE // 255 for channel in channels)
-        np.testing.assert_array_equal(_rgb565_pwm_totals(), expected)
 
     def test_energy_maxima_match_full_history_across_expiration_and_reset(self):
         energy = AdaptiveAudioEnergy(fft_size=128)

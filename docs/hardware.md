@@ -55,15 +55,34 @@ Use wire sizes, connectors, fuses and power injection suitable for the actual
 panel current and cable lengths. Keep the external +5 V off the USB-powered
 ESP32's 5 V pin unless the specific board supports that arrangement.
 
-Live frames and the startup diagnostic also clamp each pixel to a total
-`R + G + B` of **64**, preserving color ratios and never boosting dim pixels.
-Temporal dithering is disabled, and both limits are reapplied before every
-non-black transmission. Even a valid full-white host frame is limited. This
+Live frames and the startup diagnostic map the full input brightness range
+into a ceiling of **18 total transmitted PWM steps per pixel**
+(`64 × 72 / 255`, rounded down), 20% above the previous 15-step ceiling.
+Video's fractional budget rises from 4 to **4.8 total PWM steps on average**
+(represented in Q8 precision), with at most 5 transmitted steps for colored pixels.
+The mapping preserves color ratios and brightness differences: middle gray
+receives about half the duty cycle of white, rather than being clamped to the
+same output. Q8 fractional values use a **fixed spatial rounding pattern**.
+A given LED receives the same PWM bytes whenever its input color is unchanged;
+there is no software cycle switching dim LEDs on and off between frames.
+Very dim shades appear as a stationary mix of neighboring brightness levels,
+which trades some fine spatial texture for steady light.
+The driver stays at brightness 255 with its own temporal dithering disabled,
+so LCD_CAM and RMT receive the same precomputed bytes. Neutral grays round
+all three channels together to avoid colored sparkle. Video white averages
+about **1.2 per channel across neighboring pixels**, using fixed `(1,1,1)`
+and `(2,2,2)` pixels (at most 6 total steps for neutral pixels).
+The LEDs hold their PWM value until the next complete host frame. Repeating
+identical data does not increase the LED chip's internal PWM frequency.
+Live audio targets **30 animation updates per second**, increased from 12;
+rendering and serial throughput determine the actual rate reported by the app.
+CLEAR blanks the panels and idle time leaves their latched output unchanged.
+Even a valid full-white host frame is limited. This
 bounds the values sent by firmware; it cannot guarantee brightness if the
 data signal is corrupted after leaving the controller.
 
-The live firmware caps channel output at **60/255** and uses an estimated **4 A total**
-FastLED power budget across all nine panels. FastLED's model counts roughly
+The live firmware uses an estimated **4.8 A total** FastLED power budget across
+all nine panels, 20% above the previous 4 A setting. FastLED's model counts roughly
 1 mA of idle draw per LED, so the previous 2 A setting was below the estimated
 idle draw of a full 48×48 display and made dense scenes nearly disappear.
 The budget is a software estimate, not a hardware current
@@ -117,7 +136,7 @@ serial port at a time. `./start.sh --no-upload --style wave` restarts just the
 stream once the firmware has been installed.
 
 The launcher defaults to the CH340 board options, `--display-size 48` and
-`--fps 12`. It uses Arduino CLI from PATH, `ARDUINO_CLI`, or the existing local
+`--fps 30`. It uses Arduino CLI from PATH, `ARDUINO_CLI`, or the existing local
 `.build/tools/arduino-cli`, and keeps its build cache in `.build/panel48`.
 
 ## Frame reception and timing
@@ -132,9 +151,9 @@ the host schedules frame transmission with `--fps`.
 The RGB565 receive buffer holds one complete frame for CRC verification.
 The firmware waits before changing display data, maps the image into nine
 panel buffers, and submits it through the assigned drivers.
-A video frame ACK means its LED transfer has started. The firmware receives
+A frame ACK means its LED transfer has started. The firmware receives
 the next packet into a separate buffer while that transfer runs, then waits
-before replacing LED pixels. Audio frame ACKs still follow completed output.
+before replacing LED pixels. Audio and video both overlap reception with output.
 Retries with the same sequence number are acknowledged without redisplay.
 CLEAR waits for transmission to finish, blanks every panel, waits for that
 transfer, and then acknowledges; it also resets duplicate-frame tracking.

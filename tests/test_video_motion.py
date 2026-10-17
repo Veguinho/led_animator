@@ -252,7 +252,7 @@ class VideoMotionTests(unittest.TestCase):
             controls.set_playback_speed(1.5)
             return select_frame(frame)
 
-        def sent(*args):
+        def sent(*args, **kwargs):
             positions.append(controls.state()["position"])
             send_times.append(now[0])
 

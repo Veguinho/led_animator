@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Doom · LED Animator</title>
+  <style>
+    :root { color-scheme:dark; font-family:system-ui,sans-serif; background:#12151d; color:#eef1f8 }
+    body { margin:0; padding:18px }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px }
+    button { color:inherit; background:#282f42; padding:10px 16px; border:1px solid #52617d; border-radius:8px; cursor:pointer; font:inherit }
+    button:first-child { background:#902b2b }
+    button:disabled { opacity:.5; cursor:default }
+    #screen { width:min(100%,560px); margin:auto; background:black }
+    #game { display:block; width:100%; height:auto; aspect-ratio:1; image-rendering:pixelated; outline-offset:3px }
+    #engine { position:fixed; left:-10000px; top:0; width:320px; height:200px; pointer-events:none }
+    canvas:focus { outline:2px solid #ffa55e }
+    #screen:fullscreen { display:grid; place-items:center; max-width:none; width:100%; height:100% }
+    #screen:fullscreen #game { width:min(100vw,100vh); height:min(100vw,100vh) }
+    p { font-size:14px; color:#b9c5db; line-height:1.5 }
+    kbd { color:#fff }
+    a { color:#a9c8ff }
+  </style>
+</head>
+<body>
+  <div class="actions">
+    <button id="play">Play Doom</button>
+    <button id="stop" disabled>Stop</button>
+    <button id="fullscreen" disabled>Fullscreen</button>
+    <span id="status" role="status" aria-live="polite">Ready · Freedoom Phase 2</span>
+  </div>
+  <canvas id="engine" width="320" height="200" aria-hidden="true"></canvas>
+  <div id="screen"><canvas id="game" width="48" height="48" tabindex="0" aria-label="Complete Doom game adapted to the 48 by 48 LED screen; click to focus keyboard controls"></canvas></div>
+  <p><kbd>W/S</kbd> or <kbd>↑/↓</kbd> move · <kbd>A/D</kbd> strafe · <kbd>←/→</kbd> turn · <kbd>Ctrl</kbd> fire · <kbd>Space</kbd> open · <kbd>Shift</kbd> run · <kbd>1–7</kbd> weapons · <kbd>Enter</kbd> select · <kbd>Esc</kbd> menu. Click the game to focus.</p>
+  <p id="output">Brightness follows Audio palette. The LEDs show the complete game at their panel resolution.</p>
+  <p>Engine: <a href="https://github.com/chocolate-doom/chocolate-doom" target="_blank" rel="noopener">Chocolate Doom</a> · Game data: <a href="https://freedoom.github.io/" target="_blank" rel="noopener">Freedoom</a>. Source and licenses are copied into <code>doom_game/</code>.</p>
+  <script type="module" src="/doom/player.js"></script>
+</body>
+</html>

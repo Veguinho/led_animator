@@ -1,4 +1,6 @@
 import colorsys
+from dataclasses import replace
+from itertools import islice
 import unittest
 from unittest import mock
 
@@ -16,10 +18,41 @@ from system_audio_visualizer import (
     build_parser,
     color_palette,
     iter_audio_frames,
+    live_audio_source,
 )
+import stream_arduino
 
 
 class AudioVisualizerTests(unittest.TestCase):
+    def test_live_audio_is_read_after_pacing_at_the_usb_send_deadline(self):
+        clock = [0.0]
+        level = [0]
+        reads, sent = [], []
+        capture, visualizer = mock.Mock(), mock.Mock(size=48)
+
+        def latest(count):
+            reads.append(clock[0])
+            return np.full(count, level[0], dtype=np.float32)
+
+        def sleep(seconds):
+            clock[0] += seconds
+            level[0] = 255
+
+        capture.latest.side_effect = latest
+        visualizer.render.side_effect = lambda samples: np.full((48, 48, 3), samples[-1], dtype=np.uint8)
+        source = live_audio_source(capture, visualizer, 12)
+        ticks = source.iter_frames
+        source = replace(source, iter_frames=lambda: islice(ticks(), 2))
+        with mock.patch.object(stream_arduino.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(stream_arduino.time, 'sleep', side_effect=sleep), \
+                mock.patch.object(stream_arduino, 'exchange_packet',
+                    side_effect=lambda connection, kind, seq, payload, *args, **kwargs: sent.append(payload)):
+            stream_arduino.stream_frames(mock.Mock(), source, loop=False, timeout=.2,
+                retries=0, drop_late=False, rebase_late=True, display_size=48)
+        self.assertEqual(reads, [0, 1 / 12])
+        self.assertFalse(any(sent[0]))
+        self.assertEqual(sent[1], encode_rgb565(np.full((48, 48, 3), 255, dtype=np.uint8)))
+
     def test_audio_eof_triggers_recovery_instead_of_repeating_stale_samples(self):
         for exit_code in (0, 1, None):
             with self.subTest(exit_code=exit_code):
