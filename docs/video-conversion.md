@@ -3,7 +3,7 @@
 [← README](../README.md) · [Stream directly to a panel](live-streaming.md)
 
 Run these commands from the repository root after installing the
-[Python dependencies](../README.md#quick-start). Install FFmpeg so `ffmpeg`
+[Python dependencies](../AGENTS.md#quick-start). Install FFmpeg so `ffmpeg`
 and `ffprobe` are on your PATH. The 48×48 container runner also needs Docker.
 
 The converter center-crops to a square, averages color into a 16×16 or 48×48
